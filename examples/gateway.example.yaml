@@ -1,0 +1,49 @@
+# mcp-host-gateway example config (v0).
+# Copy to gateway.yaml (git-ignored is wise if you add real hostnames) and point GATEWAY_CONFIG at it.
+# No secrets belong in this file. Tokens and upstream credentials come from the environment.
+
+version: 1
+
+listen:
+  host: 127.0.0.1   # bind to 0.0.0.0 only behind a TLS-terminating reverse proxy
+  port: 8080
+
+# Production: JWT verified against the issuer's JWKS. The token must carry iss, aud, sub and exp.
+# The plan is read from the claim named by plan_claim (default "plan").
+auth:
+  mode: jwt
+  issuer: https://accounts.example.com
+  audience: mcp-host-gateway
+  # jwks_url: https://accounts.example.com/.well-known/jwks.json   # default is <issuer>/.well-known/jwks.json
+  # plan_claim: plan
+  # default_plan: free        # if omitted, tokens with no plan claim are denied
+
+# Development and tests: opaque tokens from an env var, never from this file.
+#   GATEWAY_STATIC_TOKENS=dev-free-token-0123456789:dev-free:free,dev-paid-token-0123456789:dev-paid:paid
+# auth:
+#   mode: static
+#   tokens_env: GATEWAY_STATIC_TOKENS
+
+upstreams:
+  jobscout:
+    url: https://jobscout.internal/mcp
+    tools_allow: [search_jobs, get_listing]
+    # auth_header_env: JOBSCOUT_UPSTREAM_AUTH   # env var holding the full Authorization header value
+    # timeout_ms: 30000
+  source_pack:
+    url: https://source-pack.internal/mcp
+    tools_allow: [list_sources, fetch_source]
+
+entitlements:
+  free:
+    upstreams: [jobscout]
+    rpm: 30
+    # Optional narrowing below the upstream allow list:
+    # tools:
+    #   jobscout: [search_jobs]
+  paid:
+    upstreams: [jobscout, source_pack]
+    rpm: 300
+
+rate:
+  scope: identity   # or identity_upstream for one bucket per caller per upstream

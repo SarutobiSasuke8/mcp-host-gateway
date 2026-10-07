@@ -1,0 +1,52 @@
+{
+  "name": "mcp-host-gateway",
+  "version": "0.1.0",
+  "description": "Hosted MCP edge (Streamable HTTP): auth, rate limits and entitlement checks in front of product MCP servers.",
+  "license": "MIT",
+  "author": "Alexei Udall",
+  "private": true,
+  "homepage": "https://github.com/SarutobiSasuke8/mcp-host-gateway#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SarutobiSasuke8/mcp-host-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SarutobiSasuke8/mcp-host-gateway/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "main": "./dist/src/main.js",
+  "bin": {
+    "mcp-host-gateway": "dist/src/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file-if-exists=.env dist/src/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "dependencies": {
+    "jose": "6.2.12",
+    "yaml": "2.9.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.19.15",
+    "eslint": "10.12.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gateway",
+    "streamable-http",
+    "auth",
+    "rate-limit"
+  ]
+}
