@@ -64,3 +64,13 @@ entitlements:
 
 rate:
   scope: identity   # or identity_upstream for one bucket per caller per upstream
+  # memory: one process, reset on restart (dev and tests).
+  # sqlite: WAL-mode file shared by every gateway process on this host and kept across restarts.
+  store: sqlite
+  sqlite_path: ./data/rate.sqlite
+
+# Audit trail: one JSON line per routed call, separate from the operational log on stdout.
+# No bodies, no tokens. Schema in README "Audit log".
+audit:
+  sink: file        # or stderr
+  path: ./data/audit.jsonl

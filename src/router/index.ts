@@ -35,7 +35,14 @@ export interface ForwardHeaders {
 export interface ForwardResult {
   status: number;
   contentType: string;
-  body: Uint8Array | string;
+  /**
+   * A buffered body (JSON answers, which are one message), or a byte stream relayed to the client
+   * as it arrives (SSE answers). Iterating the stream throws if the upstream fails or the call is
+   * aborted mid-stream.
+   */
+  body: Uint8Array | string | AsyncIterable<Uint8Array>;
+  /** True when `body` is a live stream. */
+  streamed: boolean;
   sessionId?: string;
 }
 
@@ -133,6 +140,68 @@ export const RESHAPERS: Readonly<Record<string, (payload: unknown, grant: Grant)
   "prompts/list": filterPromptsList,
 };
 
+/**
+ * Relay a text/event-stream body event by event. Events whose data is a JSON-RPC response with a
+ * `result` are passed through `transform`; every other event (progress and other notifications,
+ * comments, keep-alives) is relayed byte for byte as soon as it is complete. Without a transform
+ * the bytes are relayed exactly as they arrive, with no parsing at all.
+ */
+export async function* relaySse(
+  source: AsyncIterable<Uint8Array>,
+  transform?: (message: unknown) => unknown,
+): AsyncGenerator<Uint8Array> {
+  if (!transform) {
+    for await (const chunk of source) yield chunk;
+    return;
+  }
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const boundary = /\r?\n\r?\n/;
+  let buffer = "";
+  const emit = (block: string): Uint8Array => encoder.encode(rewriteSseEvent(block, transform) + "\n\n");
+  for await (const chunk of source) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let match = boundary.exec(buffer);
+    while (match) {
+      const block = buffer.slice(0, match.index);
+      buffer = buffer.slice(match.index + match[0].length);
+      yield emit(block);
+      match = boundary.exec(buffer);
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim().length > 0) yield emit(buffer);
+}
+
+function rewriteSseEvent(block: string, transform: (message: unknown) => unknown): string {
+  const lines = block.split(/\r?\n/);
+  const dataLines = lines.filter((line) => line.startsWith("data:"));
+  if (dataLines.length === 0) return block;
+  let message: unknown;
+  try {
+    message = JSON.parse(dataLines.map((line) => line.slice(5).replace(/^ /, "")).join("\n"));
+  } catch {
+    return block;
+  }
+  if (!message || typeof message !== "object" || !("result" in message)) return block;
+  const kept = lines.filter((line) => !line.startsWith("data:"));
+  return [...kept, `data: ${JSON.stringify(transform(message))}`].join("\n");
+}
+
+async function* readBody(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) yield value;
+    }
+  } finally {
+    // Cancels the upstream body if the consumer stops early (client gone, error).
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
 /** Parse a buffered text/event-stream body into its JSON data payloads. */
 export function parseSseJson(text: string): unknown[] {
   const out: unknown[] = [];
@@ -152,6 +221,27 @@ export function parseSseJson(text: string): unknown[] {
   return out;
 }
 
+/** Map an abort to a reason, or undefined when the error was not an abort. */
+function abortReason(error: unknown, timeout: AbortSignal, signal: AbortSignal | undefined): string | undefined {
+  if (signal?.aborted) return "client disconnected";
+  if (timeout.aborted || (error as Error | undefined)?.name === "TimeoutError") return "timed out";
+  return undefined;
+}
+
+/** Re-throw mid-stream failures as the gateway's upstream error so the edge can audit them. */
+async function* guardStream(
+  stream: AsyncIterable<Uint8Array>,
+  upstreamName: string,
+  timeout: AbortSignal,
+  signal: AbortSignal | undefined,
+): AsyncGenerator<Uint8Array> {
+  try {
+    yield* stream;
+  } catch (error) {
+    throw upstreamUnavailable(upstreamName, abortReason(error, timeout, signal) ?? "stream failed");
+  }
+}
+
 export class Router {
   private readonly fetchImpl: typeof fetch;
   private readonly env: NodeJS.ProcessEnv;
@@ -161,12 +251,17 @@ export class Router {
     this.env = options.env ?? process.env;
   }
 
+  /**
+   * Forward one JSON-RPC message. `signal` aborts the upstream request (the edge fires it when the
+   * client disconnects); the upstream's `timeout_ms` caps the whole exchange, streaming included.
+   */
   async forward(
     upstreamName: string,
     upstream: UpstreamConfig,
     grant: Grant,
     request: JsonRpcRequest,
     headers: ForwardHeaders,
+    signal?: AbortSignal,
   ): Promise<ForwardResult> {
     const outbound = new Headers({
       "Content-Type": "application/json",
@@ -180,48 +275,57 @@ export class Router {
       outbound.set("Authorization", value);
     }
 
+    const timeout = AbortSignal.timeout(upstream.timeout_ms);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let response: Response;
     try {
       response = await this.fetchImpl(upstream.url, {
         method: "POST",
         headers: outbound,
         body: JSON.stringify(request),
-        signal: AbortSignal.timeout(upstream.timeout_ms),
+        signal: combined,
       });
     } catch (error) {
-      const reason = (error as Error).name === "TimeoutError" ? "timed out" : "connection failed";
-      throw upstreamUnavailable(upstreamName, reason);
+      throw upstreamUnavailable(upstreamName, abortReason(error, timeout, signal) ?? "connection failed");
     }
 
     const contentType = response.headers.get("content-type") ?? "application/octet-stream";
     const sessionId = response.headers.get("mcp-session-id") ?? undefined;
-    const bytes = new Uint8Array(await response.arrayBuffer());
 
-    if (response.status >= 500) throw upstreamUnavailable(upstreamName, `HTTP ${response.status}`);
+    if (response.status >= 500) {
+      await response.body?.cancel().catch(() => undefined);
+      throw upstreamUnavailable(upstreamName, `HTTP ${response.status}`);
+    }
 
-    const result: ForwardResult = { status: response.status, contentType, body: bytes };
+    const reshape = response.status === 200 ? RESHAPERS[request.method] : undefined;
+
+    // SSE answers are relayed as they arrive. For initialize, tools/list and prompts/list the
+    // final result event is re-shaped to the grant on the way through.
+    if (contentType.includes("text/event-stream") && response.body) {
+      const stream = relaySse(readBody(response.body), reshape ? (message) => reshape(message, grant) : undefined);
+      const result: ForwardResult = { status: response.status, contentType: "text/event-stream", body: guardStream(stream, upstreamName, timeout, signal), streamed: true };
+      if (sessionId) result.sessionId = sessionId;
+      return result;
+    }
+
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      throw upstreamUnavailable(upstreamName, abortReason(error, timeout, signal) ?? "response body failed");
+    }
+    const result: ForwardResult = { status: response.status, contentType, body: bytes, streamed: false };
     if (sessionId) result.sessionId = sessionId;
+    if (!reshape) return result;
 
-    const reshape = RESHAPERS[request.method];
-    if (!reshape || response.status !== 200) return result;
-
-    // initialize, tools/list and prompts/list: re-shape the advertised surface to the grant,
-    // whatever the transport framing.
-    const text = new TextDecoder().decode(bytes);
     if (contentType.includes("application/json")) {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text);
+        parsed = JSON.parse(new TextDecoder().decode(bytes));
       } catch {
         throw upstreamUnavailable(upstreamName, `${request.method} response was not JSON`);
       }
       return { ...result, contentType: "application/json", body: JSON.stringify(reshape(parsed, grant)) };
-    }
-    if (contentType.includes("text/event-stream")) {
-      const messages = parseSseJson(text);
-      const reply = messages.find((m) => m && typeof m === "object" && "result" in (m as object));
-      if (!reply) throw upstreamUnavailable(upstreamName, `${request.method} stream carried no result`);
-      return { ...result, contentType: "application/json", body: JSON.stringify(reshape(reply, grant)) };
     }
     throw upstreamUnavailable(upstreamName, `unexpected content type ${contentType}`);
   }

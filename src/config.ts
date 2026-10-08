@@ -64,14 +64,28 @@ const configSchema = z.object({
     .object({
       // "identity": one bucket per caller. "identity_upstream": one bucket per caller per upstream.
       scope: z.enum(["identity", "identity_upstream"]).default("identity"),
+      // "memory": one process, lost on restart (tests, dev). "sqlite": a WAL-mode file shared by
+      // every gateway process on the host that points at it, and kept across restarts.
+      store: z.enum(["memory", "sqlite"]).default("memory"),
+      sqlite_path: z.string().min(1).default("./data/rate.sqlite"),
     })
-    .default({ scope: "identity" }),
+    .default({ scope: "identity", store: "memory", sqlite_path: "./data/rate.sqlite" }),
+  audit: z
+    .object({
+      // Audit lines go to their own sink, never the operational log on stdout.
+      // "stderr": one JSON line per routed call on stderr. "file": appended to `path`.
+      sink: z.enum(["stderr", "file"]).default("stderr"),
+      path: z.string().min(1).default("./data/audit.jsonl"),
+    })
+    .default({ sink: "stderr", path: "./data/audit.jsonl" }),
 });
 
 export type GatewayConfig = z.infer<typeof configSchema>;
 export type UpstreamConfig = GatewayConfig["upstreams"][string];
 export type PlanConfig = GatewayConfig["entitlements"][string];
 export type AuthConfig = GatewayConfig["auth"];
+export type RateConfig = GatewayConfig["rate"];
+export type AuditConfig = GatewayConfig["audit"];
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";

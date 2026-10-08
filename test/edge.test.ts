@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { silentAudit } from "../src/audit.js";
 import { ErrorCode } from "../src/edge/errors.js";
 import { createGateway } from "../src/edge/server.js";
 import type { Gateway } from "../src/edge/server.js";
@@ -27,7 +28,7 @@ async function harness(options: { sse?: boolean; upstreamStatus?: number } = {})
   const env = { GATEWAY_STATIC_TOKENS: STATIC_TOKENS_ENV, JOBSCOUT_UPSTREAM_AUTH: "Bearer upstream-secret-value" };
   const config = staticConfig(upstream.url);
   config.upstreams.jobscout!.auth_header_env = "JOBSCOUT_UPSTREAM_AUTH";
-  const gateway = createGateway(config, { logger, env, limiter: new TokenBucketLimiter() });
+  const gateway = createGateway(config, { logger, env, limiter: new TokenBucketLimiter(), audit: silentAudit });
   const port = await gateway.start();
   return {
     gateway,
@@ -122,7 +123,8 @@ void test("tools/list is filtered to the caller's grant, for JSON and SSE upstre
     try {
       const free = await rpc(h.base, "jobscout", { jsonrpc: "2.0", id: 1, method: "tools/list" }, bearer(FREE_TOKEN));
       assert.equal(free.status, 200, `sse=${sse}`);
-      assert.equal(free.headers.get("content-type"), "application/json");
+      // SSE answers are streamed through (v1), JSON answers stay JSON.
+      assert.equal(free.headers.get("content-type"), sse ? "text/event-stream" : "application/json");
       const freeTools = (free.json as { result: { tools: Array<{ name: string }> } }).result.tools.map((t) => t.name);
       assert.deepEqual(freeTools, ["search_jobs"]);
 

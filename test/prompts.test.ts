@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { silentAudit } from "../src/audit.js";
 import type { GatewayConfig } from "../src/config.js";
 import { ConfigError, parseConfig, parseConfigYaml } from "../src/config.js";
 import { ErrorCode } from "../src/edge/errors.js";
@@ -63,6 +64,7 @@ async function harness(options: { sse?: boolean } = {}): Promise<Harness> {
     logger: silentLogger,
     env: { GATEWAY_STATIC_TOKENS: STATIC_TOKENS_ENV },
     limiter: new TokenBucketLimiter(),
+    audit: silentAudit,
   });
   const port = await gateway.start();
   return {
@@ -95,7 +97,7 @@ void test("initialize advertises prompts only to a caller whose grant has prompt
     try {
       const free = await rpc(h.base, "jobscout", INIT, bearer(FREE_TOKEN));
       assert.equal(free.status, 200, `sse=${sse}`);
-      assert.equal(free.headers.get("content-type"), "application/json");
+      assert.equal(free.headers.get("content-type"), sse ? "text/event-stream" : "application/json");
       assert.deepEqual(capabilitiesOf(free.json), { tools: { listChanged: false } }, `sse=${sse}`);
 
       const paid = await rpc(h.base, "jobscout", INIT, bearer(PAID_TOKEN));

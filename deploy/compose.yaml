@@ -1,0 +1,77 @@
+# Single-VPS recipe: Caddy (TLS) -> mcp-host-gateway -> JobScout (Streamable HTTP).
+# Placeholders only. Nothing in this repo deploys it. See docs/DEPLOYMENT.md.
+#
+#   cd /opt/mcp-host-gateway/deploy && docker compose up -d --build
+#
+# Only Caddy publishes ports. The gateway and JobScout sit on an internal network.
+
+name: mcp-host-gateway
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in deploy/.env, for example gateway.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge]
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  gateway:
+    image: mcp-host-gateway:${GATEWAY_TAG:-local}
+    build:
+      context: ..
+    restart: unless-stopped
+    # Secrets (upstream credentials, static dev tokens if ever used) come from this file, mode 0600,
+    # owned by root, never committed. See deploy/gateway.env.example.
+    env_file:
+      - /etc/mcp-host-gateway/gateway.env
+    environment:
+      GATEWAY_CONFIG: /etc/mcp-host-gateway/gateway.yaml
+      GATEWAY_LOG_LEVEL: info
+    volumes:
+      - /etc/mcp-host-gateway/gateway.yaml:/etc/mcp-host-gateway/gateway.yaml:ro
+      # rate.sqlite (shared rate store, WAL) and audit.jsonl (audit trail) live here.
+      - gateway-data:/app/data
+    networks: [edge, internal]
+    depends_on:
+      jobscout:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  jobscout:
+    # Example upstream: JobScout's Streamable HTTP entrypoint, built from a pinned commit.
+    image: jobscout-mcp:621ddcf
+    build:
+      context: https://github.com/SarutobiSasuke8/jobscout-mcp.git#621ddcf23ddeedb3dcd347f597500e893896b6a1
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      # Providers are off unless enabled. Enable only the ones you have reviewed, for example:
+      # JOBSCOUT_ENABLE_HIMALAYAS: "true"
+    env_file:
+      - /etc/mcp-host-gateway/jobscout.env
+    networks: [internal]
+
+networks:
+  edge: {}
+  internal:
+    internal: true
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}
+  gateway-data: {}
