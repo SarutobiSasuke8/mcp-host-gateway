@@ -2,7 +2,7 @@
 
 Hosted MCP edge: auth, rate limits, and paid entitlement in front of product MCPs (JobScout freemium wedge and siblings).
 
-A client speaks MCP over Streamable HTTP to `https://gateway.example/mcp/<upstream>` with a bearer token. The gateway verifies the token, maps the caller to a plan, checks that the plan covers the upstream and the tool, applies a per-identity rate limit, then forwards the JSON-RPC call to the configured upstream URL and returns the result. It carries no product logic; the upstream MCP server does the work.
+A client speaks MCP over Streamable HTTP to `https://gateway.example/mcp/<upstream>` with a bearer token. The gateway verifies the token, maps the caller to a plan, checks that the plan covers the upstream and the tool or prompt, applies a per-identity rate limit, then forwards the JSON-RPC call to the configured upstream URL and returns the result. It carries no product logic; the upstream MCP server does the work.
 
 **Status:** v0. Design and acceptance checklist live in the Agentic Satellite Vault:
 
@@ -27,9 +27,10 @@ client  ──Bearer──▶  gateway  ──▶  auth  ──▶  entitlement 
 | Stage | Behaviour |
 | --- | --- |
 | Auth | Bearer JWT verified against the issuer's JWKS (`jose`), with `iss` and `aud` checked. Or `auth.mode: static` for development, tokens from an env var. Missing or invalid tokens get a JSON-RPC error `-32001` with HTTP 401. |
-| Entitlement | Identity to plan (JWT `plan` claim, or the static token entry) to allowed upstreams and tools. Anything else gets `-32003` with HTTP 403 and a message naming the plan, upstream and tool. |
+| Entitlement | Identity to plan (JWT `plan` claim, or the static token entry) to allowed upstreams, tools and prompts. Anything else gets `-32003` with HTTP 403 and a message naming the plan, upstream and tool or prompt. Prompts are deny by default: an upstream needs `prompts_allow` before any prompt is routed. |
 | Rate limit | In-memory token bucket per identity (optionally per identity and upstream), capacity and refill set by the plan's `rpm`. Over quota gets `-32029` with HTTP 429 and `Retry-After`. |
-| Router | Forwards `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` and `notifications/cancelled` to the upstream over Streamable HTTP via `fetch`. `tools/list` results are filtered to the grant, whether the upstream answers in JSON or SSE framing. Other methods get `-32601`. `Mcp-Session-Id` and `MCP-Protocol-Version` pass through both ways. HTTP `DELETE` (session end) is forwarded. |
+| Router | Forwards `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` and `notifications/cancelled` to the upstream over Streamable HTTP via `fetch`, plus `prompts/list` and `prompts/get` for upstreams with a `prompts_allow` list. `tools/list` and `prompts/list` results are filtered to the grant, whether the upstream answers in JSON or SSE framing. Other methods get `-32601`. `Mcp-Session-Id` and `MCP-Protocol-Version` pass through both ways. HTTP `DELETE` (session end) is forwarded. |
+| Honest capabilities | The `initialize` result is rewritten per caller: `capabilities` keeps `tools` and, only when the caller's grant has at least one prompt, `prompts`. `resources`, `completions`, `logging`, `experimental` and any unknown capability are dropped, so a client is never told about a method the gateway would refuse. |
 | Health | `GET /health` and `GET /ready`, no tenant data. |
 | Startup | Fails closed: missing issuer, unreachable JWKS, missing static tokens, missing upstreams, or a plan naming an unknown upstream or tool all stop the process with a non-zero exit. |
 | Logs | JSON lines. Bearer tokens, JWTs, `Authorization` headers and secret-shaped keys are redacted. Bodies are never logged. |
@@ -51,7 +52,10 @@ Static dev mode, which needs no identity provider:
 version: 1
 auth: { mode: static, tokens_env: GATEWAY_STATIC_TOKENS }
 upstreams:
-  jobscout: { url: http://127.0.0.1:3000/mcp, tools_allow: [search_jobs, get_listing] }
+  jobscout:
+    url: http://127.0.0.1:3000/mcp
+    tools_allow: [jobscout_list_sources, jobscout_search_jobs, jobscout_briefing]
+    prompts_allow: [jobscout_setup, jobscout_find_jobs]
 entitlements:
   free: { upstreams: [jobscout], rpm: 30 }
   paid: { upstreams: [jobscout], rpm: 300 }
@@ -81,18 +85,22 @@ auth:
 upstreams:
   jobscout:
     url: https://jobscout.internal/mcp
-    tools_allow: [search_jobs, get_listing]
+    tools_allow: [jobscout_list_sources, jobscout_search_jobs, jobscout_briefing]
+    prompts_allow: [jobscout_setup, jobscout_find_jobs]   # optional; absent means no prompts/* routing
     # auth_header_env: JOBSCOUT_UPSTREAM_AUTH   # env var with the full Authorization value for the upstream
     # timeout_ms: 30000
 entitlements:
   free: { upstreams: [jobscout], rpm: 30 }
   paid: { upstreams: [jobscout, source_pack], rpm: 300 }
-  # a plan may narrow an upstream's tools: tools: { jobscout: [search_jobs] }
+  # a plan may narrow an upstream's tools: tools: { jobscout: [jobscout_search_jobs] }
+  # and its prompts: prompts: { jobscout: [jobscout_setup] }  ([] means no prompts on that plan)
 rate:
   scope: identity        # or identity_upstream
 ```
 
-The full annotated example is `examples/gateway.example.yaml`. Set `GATEWAY_CONFIG` to the file path (default `./gateway.yaml`).
+The full annotated example is `examples/gateway.example.yaml`. Its JobScout tool and prompt names are exactly what jobscout-mcp `main` returns from `tools/list` and `prompts/list`, and a test fails if the example names anything else.
+
+Prompt rules mirror tool rules: a plan's `prompts` narrowing may only name prompts in that upstream's `prompts_allow`, and only for upstreams on that plan, or the config is rejected at startup. Unlike `tools`, a plan may narrow prompts to an empty list, which hides the `prompts` capability from that plan's callers. Set `GATEWAY_CONFIG` to the file path (default `./gateway.yaml`).
 
 Environment variables are listed in `.env.example`. None are committed with values.
 
@@ -101,26 +109,27 @@ Environment variables are listed in `.env.example`. None are committed with valu
 Every rejection is a JSON-RPC 2.0 error object so an MCP client can show the reason:
 
 ```json
-{ "jsonrpc": "2.0", "id": 5, "error": { "code": -32003, "message": "Forbidden: tool \"get_listing\" is not available on plan \"free\" for upstream \"jobscout\"", "data": { "plan": "free", "upstream": "jobscout", "tool": "get_listing" } } }
+{ "jsonrpc": "2.0", "id": 5, "error": { "code": -32003, "message": "Forbidden: tool \"jobscout_deduplicate\" is not available on plan \"free\" for upstream \"jobscout\"", "data": { "plan": "free", "upstream": "jobscout", "tool": "jobscout_deduplicate" } } }
 ```
 
 | Code | HTTP | Meaning |
 | --- | --- | --- |
 | -32001 | 401 | Unauthenticated (missing, malformed, expired, wrong issuer or audience, bad signature) |
-| -32003 | 403 | Forbidden by entitlement (plan, upstream or tool) |
+| -32003 | 403 | Forbidden by entitlement (plan, upstream, tool or prompt) |
 | -32029 | 429 | Rate limit exceeded, `Retry-After` header set |
 | -32600 | 400 | Invalid JSON-RPC request (batches, non-JSON bodies, oversize bodies) |
-| -32601 | 404 | Method not routed, or unknown upstream path |
+| -32601 | 404 | Method not routed (including `prompts/*` on an upstream without `prompts_allow`), or unknown upstream path |
 | -32002 | 502 | Upstream unreachable, timed out, or returned 5xx |
 
-## v0 decisions (open questions from the design, answered)
+## Decisions (open questions from the design, answered)
 
-| Question | v0 decision | Reason |
+| Question | Decision | Reason |
 | --- | --- | --- |
 | OAuth provider | Any issuer that publishes a JWKS and mints JWTs with `iss`, `aud`, `sub`, `exp` and a plan claim. No provider SDK. Static env tokens for dev and tests. | Keeps the gateway provider-neutral; the paid-account issuer can be chosen later without code changes. |
 | SSE fallback | Streamable HTTP only. `GET /mcp/<upstream>` (server-initiated stream) returns 405. SSE-framed upstream responses are buffered and relayed, not streamed. | The 2025-06-18 transport is the target; legacy HTTP+SSE adds a second code path for no v0 customer. |
 | Entitlement source of truth | Static YAML plan map in config, plus the token's `plan` claim to pick the plan. | One file to review in a PR; no billing system to call at request time. |
 | npm vs deploy-only | Deploy-only. `private: true`, no publish. | Nothing to install as a library yet; a published package would imply an API contract v0 does not have. |
+| Prompts (#3) | Routed per upstream behind a deny-by-default `prompts_allow`, narrowed per plan, `prompts/list` filtered and `prompts/get` gated like `tools/call`. `initialize` capabilities rewritten to what the caller can actually use. | JobScout exposes onboarding prompts (`jobscout_setup`, `jobscout_find_jobs`). Passing `initialize` through told clients about `prompts` and then answered `-32601`; an honest, smaller capability set is better than an error. |
 
 ## MVP acceptance checklist
 
@@ -138,7 +147,7 @@ Deferred from v0, with reasons:
 - Streaming relay of SSE tool responses. Responses are buffered, which loses progress notifications on long tool calls but returns correct results. Revisit when an upstream needs it.
 - Legacy HTTP+SSE transport and `GET` server-to-client streams. Not needed by the first upstream.
 - Entitlement lookups against a billing system. Static YAML plus the token claim covers the freemium wedge.
-- `resources/*` and `prompts/*` routing. Out of scope until an upstream exposes them; allowing them without filtering would widen the surface.
+- `resources/*` routing and `completions/complete`. Out of scope until an upstream needs them; the gateway strips those capabilities from `initialize` so clients do not try.
 
 ## Development
 

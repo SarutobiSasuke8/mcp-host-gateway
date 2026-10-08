@@ -11,6 +11,22 @@ export const STUB_TOOLS = [
   { name: "admin_purge", description: "Dangerous", inputSchema: { type: "object" } },
 ];
 
+export const STUB_PROMPTS = [
+  { name: "setup", description: "Onboarding" },
+  { name: "find_jobs", description: "Guided search", arguments: [{ name: "role", required: false }] },
+  { name: "internal_debug", description: "Never exposed" },
+];
+
+/** Everything a full-featured upstream might advertise, including capabilities the gateway refuses. */
+export const FULL_CAPABILITIES = {
+  tools: { listChanged: false },
+  prompts: { listChanged: false },
+  resources: { subscribe: true },
+  completions: {},
+  logging: {},
+  experimental: { anything: {} },
+};
+
 export interface StubUpstream {
   url: string;
   received: Array<{ method: string; headers: Record<string, string | string[] | undefined>; body: unknown }>;
@@ -22,7 +38,9 @@ export interface StubUpstream {
  * JSON responses, and records every request so tests can assert on what the gateway forwarded.
  * With `sse: true` it frames the tools/list response as text/event-stream.
  */
-export async function startStubUpstream(options: { sse?: boolean; status?: number } = {}): Promise<StubUpstream> {
+export async function startStubUpstream(
+  options: { sse?: boolean; status?: number; capabilities?: Record<string, unknown> } = {},
+): Promise<StubUpstream> {
   const received: StubUpstream["received"] = [];
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -45,7 +63,17 @@ export async function startStubUpstream(options: { sse?: boolean; status?: numbe
       let result: unknown;
       switch (message.method) {
         case "initialize":
-          result = { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "stub", version: "0" } };
+          result = {
+            protocolVersion: "2025-06-18",
+            capabilities: options.capabilities ?? { tools: {} },
+            serverInfo: { name: "stub", version: "0" },
+          };
+          break;
+        case "prompts/list":
+          result = { prompts: STUB_PROMPTS };
+          break;
+        case "prompts/get":
+          result = { messages: [{ role: "user", content: { type: "text", text: `prompt ${message.params?.name}` } }] };
           break;
         case "ping":
           result = {};
@@ -62,7 +90,7 @@ export async function startStubUpstream(options: { sse?: boolean; status?: numbe
           return;
       }
       const reply = { jsonrpc: "2.0", id: message.id ?? null, result };
-      if (options.sse && message.method === "tools/list") {
+      if (options.sse && (message.method === "tools/list" || message.method === "initialize" || message.method === "prompts/list")) {
         res.writeHead(200, { "Content-Type": "text/event-stream", "Mcp-Session-Id": "stub-session" });
         res.end(`event: message\ndata: ${JSON.stringify(reply)}\n\n`);
         return;
