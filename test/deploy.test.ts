@@ -7,8 +7,11 @@ import { parseConfigYaml } from "../src/config.js";
 /**
  * Static checks on the shipped deploy artefacts. These do not replace `scripts/docker-smoke.sh`
  * (which needs a Docker daemon); they stop the recipe drifting from the code between runs.
+ *
+ * Line endings are normalised because a Windows checkout with core.autocrlf has CRLF files.
  */
-const read = (path: string): string => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+const read = (path: string): string =>
+  readFileSync(new URL(`../../${path}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 void test("deploy/gateway.yaml is a valid production-shaped config", () => {
   const config = parseConfigYaml(read("deploy/gateway.yaml"));
