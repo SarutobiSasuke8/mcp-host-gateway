@@ -68,11 +68,11 @@ function headerValue(req: IncomingMessage, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function paramName(request: JsonRpcRequest | undefined, method: string): string | null {
+function paramName(request: JsonRpcRequest | undefined, method: string, key: "name" | "uri" = "name"): string | null {
   if (!request || request.method !== method) return null;
   const params = request.params;
-  const name = params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
-  return typeof name === "string" ? name : null;
+  const value = params && typeof params === "object" ? (params as Record<string, unknown>)[key] : undefined;
+  return typeof value === "string" ? value : null;
 }
 
 function decisionFor(error: GatewayError): AuditDecision {
@@ -130,6 +130,7 @@ export function createGateway(config: GatewayConfig, options: GatewayOptions = {
         method,
         tool: paramName(request, "tools/call"),
         prompt: paramName(request, "prompts/get"),
+        resource: paramName(request, "resources/read", "uri"),
         decision,
         reason,
         status,

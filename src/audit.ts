@@ -21,12 +21,13 @@ import { redactString } from "./log.js";
  * | method      | string or null  | JSON-RPC method, or `HTTP DELETE` for session end; null if the body never parsed |
  * | tool        | string or null  | `params.name` of a `tools/call` |
  * | prompt      | string or null  | `params.name` of a `prompts/get` |
+ * | resource    | string or null  | `params.uri` of a `resources/read` |
  * | decision    | string          | `allow`, `deny`, `rate_limited` or `upstream_error` |
  * | reason      | string or null  | Why a call was not allowed, or `client_disconnected` |
  * | status      | integer         | HTTP status returned (499 when the client went away mid-stream) |
  * | duration_ms | integer         | Wall time from request start to response end |
  *
- * Never written: request or response bodies, tool arguments, prompt arguments, tool results,
+ * Never written: request or response bodies, tool arguments, prompt arguments, tool results, resource contents,
  * headers, bearer tokens, upstream credentials, client IP addresses. String fields are passed
  * through the same redaction as the operational log and capped in length as a second guard.
  */
@@ -40,6 +41,7 @@ export interface AuditEntry {
   method: string | null;
   tool: string | null;
   prompt: string | null;
+  resource: string | null;
   decision: AuditDecision;
   reason: string | null;
   status: number;
@@ -55,6 +57,7 @@ export const AUDIT_KEYS = [
   "method",
   "tool",
   "prompt",
+  "resource",
   "decision",
   "reason",
   "status",
@@ -88,6 +91,7 @@ export class AuditLog {
       method: clean(entry.method),
       tool: clean(entry.tool),
       prompt: clean(entry.prompt),
+      resource: clean(entry.resource),
       decision: entry.decision,
       reason: clean(entry.reason),
       status: entry.status,

@@ -2,7 +2,7 @@
 
 Hosted MCP edge: auth, rate limits, and paid entitlement in front of product MCPs (JobScout freemium wedge and siblings).
 
-A client speaks MCP over Streamable HTTP to `https://gateway.example/mcp/<upstream>` with a bearer token. The gateway verifies the token, maps the caller to a plan, checks that the plan covers the upstream and the tool or prompt, applies a per-identity rate limit, then forwards the JSON-RPC call to the configured upstream URL and returns the result. It carries no product logic; the upstream MCP server does the work.
+A client speaks MCP over Streamable HTTP to `https://gateway.example/mcp/<upstream>` with a bearer token. The gateway verifies the token, maps the caller to a plan, checks that the plan covers the upstream and the tool, prompt or resource, applies a per-identity rate limit, then forwards the JSON-RPC call to the configured upstream URL and returns the result. It carries no product logic; the upstream MCP server does the work.
 
 **Status:** v1 (production-ready edge for one VPS: shared rate store, streaming SSE relay, container, deploy recipe, audit log, end-to-end test against JobScout). Design and acceptance checklist live in the Agentic Satellite Vault:
 
@@ -27,12 +27,12 @@ client  ──Bearer──▶  gateway  ──▶  auth  ──▶  entitlement 
 | Stage | Behaviour |
 | --- | --- |
 | Auth | Bearer JWT verified against the issuer's JWKS (`jose`), with `iss` and `aud` checked. Or `auth.mode: static` for development, tokens from an env var. Missing or invalid tokens get a JSON-RPC error `-32001` with HTTP 401 and a `WWW-Authenticate: Bearer` challenge whose `resource_metadata` points MCP clients at the sign-in server. Keys are cached for seconds, not minutes, so revoked and newly issued tokens take effect quickly; see "Token freshness". |
-| Entitlement | Identity to plan (JWT `plan` claim, or the static token entry) to allowed upstreams, tools and prompts. Anything else gets `-32003` with HTTP 403 and a message naming the plan, upstream and tool or prompt. Prompts are deny by default: an upstream needs `prompts_allow` before any prompt is routed. |
+| Entitlement | Identity to plan (JWT `plan` claim, or the static token entry) to allowed upstreams, tools, prompts and resource URI prefixes. Anything else gets `-32003` with HTTP 403 and a message naming the plan, upstream and tool, prompt or resource. Prompts and resources are deny by default: an upstream needs `prompts_allow` before any prompt is routed, and `resources_allow` before any resource is. |
 | Rate limit | Token bucket per identity (optionally per identity and upstream), capacity and refill set by the plan's `rpm`, kept in a `RateStore`: SQLite (WAL) shared across processes and restarts in production, in-memory for tests. Every authenticated call counts, including ones then refused. Over quota gets `-32029` with HTTP 429 and `Retry-After`. |
-| Router | Forwards `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` and `notifications/cancelled` to the upstream over Streamable HTTP via `fetch`, plus `prompts/list` and `prompts/get` for upstreams with a `prompts_allow` list. `tools/list` and `prompts/list` results are filtered to the grant, whether the upstream answers in JSON or SSE framing. SSE answers are relayed event by event as they arrive (progress notifications reach the client during a long tool call), with the final result of `initialize`, `tools/list` and `prompts/list` re-shaped on the way through. A client that disconnects aborts the upstream request. Other methods get `-32601`. `Mcp-Session-Id` and `MCP-Protocol-Version` pass through both ways. HTTP `DELETE` (session end) is forwarded. |
-| Honest capabilities | The `initialize` result is rewritten per caller: `capabilities` keeps `tools` and, only when the caller's grant has at least one prompt, `prompts`. `resources`, `completions`, `logging`, `experimental` and any unknown capability are dropped, so a client is never told about a method the gateway would refuse. |
+| Router | Forwards `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` and `notifications/cancelled` to the upstream over Streamable HTTP via `fetch`, plus `prompts/list` and `prompts/get` for upstreams with a `prompts_allow` list, and `resources/list`, `resources/templates/list` and `resources/read` for upstreams with a `resources_allow` list of URI prefixes. `tools/list`, `prompts/list`, `resources/list` and `resources/templates/list` results are filtered to the grant, whether the upstream answers in JSON or SSE framing. SSE answers are relayed event by event as they arrive (progress notifications reach the client during a long tool call), with the final result of `initialize` and the list methods re-shaped on the way through. `resources/subscribe` and `resources/unsubscribe` are never routed. A client that disconnects aborts the upstream request. Other methods get `-32601`. `Mcp-Session-Id` and `MCP-Protocol-Version` pass through both ways. HTTP `DELETE` (session end) is forwarded. |
+| Honest capabilities | The `initialize` result is rewritten per caller: `capabilities` keeps `tools`, `prompts` only when the caller's grant has at least one prompt, and `resources` only when the grant has at least one URI prefix (with `subscribe` removed, since the gateway does not route it). `completions`, `logging`, `experimental` and any unknown capability are dropped, so a client is never told about a method the gateway would refuse. |
 | Health | `GET /health` and `GET /ready`, no tenant data. |
-| Startup | Fails closed: missing config, missing issuer, unreachable JWKS, missing static tokens, missing upstreams, a plan naming an unknown upstream, tool or prompt, or a rate store that cannot be opened all stop the process with a non-zero exit. |
+| Startup | Fails closed: missing config, missing issuer, unreachable JWKS, missing static tokens, missing upstreams, a plan naming an unknown upstream, tool, prompt or resource prefix, or a rate store that cannot be opened all stop the process with a non-zero exit. |
 | Logs | Operational log: JSON lines on stdout. Bearer tokens, JWTs, `Authorization` headers and secret-shaped keys are redacted. Bodies are never logged. |
 | Audit | One JSON line per routed call to its own sink (file or stderr), with a fixed schema and no bodies or tokens. See "Audit log". Every response carries `X-Request-Id`, which matches the audit line. |
 
@@ -92,11 +92,16 @@ upstreams:
     prompts_allow: [jobscout_setup, jobscout_find_jobs]   # optional; absent means no prompts/* routing
     # auth_header_env: JOBSCOUT_UPSTREAM_AUTH   # env var with the full Authorization value for the upstream
     # timeout_ms: 30000
+  source_pack:
+    url: https://source-pack.internal/mcp
+    tools_allow: [list_sources, fetch_source]
+    resources_allow: ["docs://public/", "sources://catalogue/"]   # optional; URI prefixes; absent means no resources/* routing
 entitlements:
   free: { upstreams: [jobscout], rpm: 30 }
   paid: { upstreams: [jobscout, source_pack], rpm: 300 }
   # a plan may narrow an upstream's tools: tools: { jobscout: [jobscout_search_jobs] }
   # and its prompts: prompts: { jobscout: [jobscout_setup] }  ([] means no prompts on that plan)
+  # and its resources: resources: { source_pack: ["docs://public/"] }  ([] means no resources on that plan)
 rate:
   scope: identity        # or identity_upstream
   store: sqlite          # memory (default) | sqlite; see "Rate limits"
@@ -108,7 +113,9 @@ audit:
 
 The full annotated example is `examples/gateway.example.yaml`. Its JobScout tool and prompt names are exactly what jobscout-mcp `main` returns from `tools/list` and `prompts/list`, and a test fails if the example names anything else.
 
-Prompt rules mirror tool rules: a plan's `prompts` narrowing may only name prompts in that upstream's `prompts_allow`, and only for upstreams on that plan, or the config is rejected at startup. Unlike `tools`, a plan may narrow prompts to an empty list, which hides the `prompts` capability from that plan's callers. Set `GATEWAY_CONFIG` to the file path (default `./gateway.yaml`).
+Prompt rules mirror tool rules: a plan's `prompts` narrowing may only name prompts in that upstream's `prompts_allow`, and only for upstreams on that plan, or the config is rejected at startup. Unlike `tools`, a plan may narrow prompts to an empty list, which hides the `prompts` capability from that plan's callers.
+
+Resource rules follow the same pattern with URI prefixes instead of names. `resources_allow` is a list of plain string prefixes (no template braces, no whitespace); a resource is allowed when its URI starts with any of them, so end each prefix at a boundary the upstream's URIs respect, usually a trailing slash (`docs://public/` does not open `docs://publicity/`). `resources/list` is filtered to resources inside the prefixes, `resources/templates/list` to templates whose literal head (before the first `{`) is inside a prefix, and `resources/read` outside every prefix gets the same `-32003` as a tool outside the plan. A plan's `resources` narrowing may only list prefixes that equal or extend one of the upstream's, and an empty list hides the `resources` capability from that plan. `resources/subscribe` is never routed and `subscribe` is never advertised. Set `GATEWAY_CONFIG` to the file path (default `./gateway.yaml`).
 
 Environment variables are listed in `.env.example`. None are committed with values.
 
@@ -172,6 +179,7 @@ One JSON line per routed call (every request to `/mcp/<upstream>`, allowed or re
 | `method` | string or null | JSON-RPC method, or `HTTP DELETE` / `HTTP GET` for non-POST requests; null if the body never parsed |
 | `tool` | string or null | `params.name` of a `tools/call` |
 | `prompt` | string or null | `params.name` of a `prompts/get` |
+| `resource` | string or null | `params.uri` of a `resources/read` |
 | `decision` | string | `allow`, `deny`, `rate_limited` or `upstream_error` |
 | `reason` | string or null | Why the call was not allowed; `client_disconnected` when the client left mid-stream |
 | `status` | integer | HTTP status returned; 499 when the client disconnected before the response finished |
@@ -180,10 +188,10 @@ One JSON line per routed call (every request to `/mcp/<upstream>`, allowed or re
 Example:
 
 ```json
-{"ts":"2026-10-08T12:00:00.000Z","request_id":"0f8e4c1a-7b2d-4e5f-9a3c-1d2e3f4a5b6c","subject":"user-123","plan":"free","upstream":"jobscout","method":"tools/call","tool":"jobscout_deduplicate","prompt":null,"decision":"deny","reason":"Forbidden: tool \"jobscout_deduplicate\" is not available on plan \"free\" for upstream \"jobscout\"","status":403,"duration_ms":2}
+{"ts":"2026-10-08T12:00:00.000Z","request_id":"0f8e4c1a-7b2d-4e5f-9a3c-1d2e3f4a5b6c","subject":"user-123","plan":"free","upstream":"jobscout","method":"tools/call","tool":"jobscout_deduplicate","prompt":null,"resource":null,"decision":"deny","reason":"Forbidden: tool \"jobscout_deduplicate\" is not available on plan \"free\" for upstream \"jobscout\"","status":403,"duration_ms":2}
 ```
 
-Never written: request or response bodies, tool or prompt arguments, tool results, headers, bearer tokens, upstream credentials or client IP addresses. String fields also pass through the log redaction and are capped at 256 characters, so a token smuggled into a tool name is still redacted. `test/audit.test.ts` drives allow, deny, rate-limited and upstream-error calls with canary values in the tokens, the upstream credential, the arguments and the response, and asserts none of them appear.
+Never written: request or response bodies, tool or prompt arguments, tool results, resource contents, headers, bearer tokens, upstream credentials or client IP addresses. String fields also pass through the log redaction and are capped at 256 characters, so a token smuggled into a tool name is still redacted. `test/audit.test.ts` drives allow, deny, rate-limited and upstream-error calls with canary values in the tokens, the upstream credential, the arguments and the response, and asserts none of them appear.
 
 ## Container
 
@@ -207,10 +215,10 @@ Every rejection is a JSON-RPC 2.0 error object so an MCP client can show the rea
 | Code | HTTP | Meaning |
 | --- | --- | --- |
 | -32001 | 401 | Unauthenticated (missing, malformed, expired, wrong issuer or audience, bad signature) |
-| -32003 | 403 | Forbidden by entitlement (plan, upstream, tool or prompt) |
+| -32003 | 403 | Forbidden by entitlement (plan, upstream, tool, prompt or resource URI) |
 | -32029 | 429 | Rate limit exceeded, `Retry-After` header set |
 | -32600 | 400 | Invalid JSON-RPC request (batches, non-JSON bodies, oversize bodies) |
-| -32601 | 404 | Method not routed (including `prompts/*` on an upstream without `prompts_allow`), or unknown upstream path |
+| -32601 | 404 | Method not routed (including `prompts/*` on an upstream without `prompts_allow`, `resources/*` on one without `resources_allow`, and `resources/subscribe` anywhere), or unknown upstream path |
 | -32002 | 502 | Upstream unreachable, timed out, or returned 5xx |
 | -32004 | 503 | Token cannot be checked: the issuer's JWKS has been unreachable for longer than `jwks_max_stale_seconds`. `Retry-After` header set |
 
@@ -227,6 +235,7 @@ These are HTTP error statuses with a JSON-RPC error body. The official TypeScrip
 | Entitlement source of truth | Static YAML plan map in config, plus the token's `plan` claim to pick the plan. | One file to review in a PR; no billing system to call at request time. |
 | npm vs deploy-only | Deploy-only. `private: true`, no publish. | Nothing to install as a library yet; a published package would imply an API contract v0 does not have. |
 | Prompts (#3) | Routed per upstream behind a deny-by-default `prompts_allow`, narrowed per plan, `prompts/list` filtered and `prompts/get` gated like `tools/call`. `initialize` capabilities rewritten to what the caller can actually use. | JobScout exposes onboarding prompts (`jobscout_setup`, `jobscout_find_jobs`). Passing `initialize` through told clients about `prompts` and then answered `-32601`; an honest, smaller capability set is better than an error. |
+| Resources (#9) | Routed per upstream behind a deny-by-default `resources_allow` list of URI prefixes, narrowed per plan, `resources/list` and `resources/templates/list` filtered to the prefixes and `resources/read` gated like `tools/call`. `subscribe` is neither routed nor advertised. | Hosted MCPs expose docs, schemas and job snapshots as resources. Prefix grants keep the policy in one YAML file and let an operator open `docs://public/` without opening `docs://internal/`. Subscriptions need a server-to-client stream the gateway does not relay. |
 
 ## MVP acceptance checklist
 
@@ -247,6 +256,7 @@ These are HTTP error statuses with a JSON-RPC error body. The official TypeScrip
 - [x] Audit log with a documented schema; a test asserts no token or body leaks. (`test/audit.test.ts`)
 - [x] Offline end-to-end test against the real JobScout HTTP server (pinned by git SHA) with the official MCP client. (`test/e2e-jobscout.test.ts`)
 - [x] Revoked tokens refused and new tokens accepted within seconds; 401s carry `WWW-Authenticate` with `resource_metadata`. (#7, `test/token-freshness.test.ts`)
+- [x] `resources/list`, `resources/templates/list` and `resources/read` routed behind a deny-by-default `resources_allow` prefix list; lists filtered, reads outside the prefixes forbidden, capability advertised only when granted. (#9, `test/resources.test.ts`)
 
 Deferred, with reasons:
 
@@ -254,7 +264,7 @@ Deferred, with reasons:
 - Legacy HTTP+SSE transport and `GET` server-to-client streams. Not needed by the first upstream; JobScout runs stateless.
 - Production OAuth provider choice. Any JWKS issuer works; which one is a product decision.
 - Entitlement lookups against a billing system. Static YAML plus the token claim covers the freemium wedge.
-- `resources/*` routing and `completions/complete`. Out of scope until an upstream needs them; the gateway strips those capabilities from `initialize` so clients do not try.
+- `resources/subscribe` and `completions/complete`. Subscriptions need the server-to-client stream above; completions wait for an upstream that needs them. The gateway strips those capabilities from `initialize` so clients do not try.
 
 ## Development
 

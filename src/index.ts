@@ -8,7 +8,7 @@ export { createAuthenticator, JwtAuthenticator, StaticAuthenticator, parseStatic
 export type { Authenticator, Identity, JwtAuthenticatorOptions } from "./auth/index.js";
 export { JwksCache, JwksFetchError, JwksUnavailableError } from "./auth/jwks.js";
 export type { JwksCacheOptions } from "./auth/jwks.js";
-export { EntitlementMap } from "./entitlement/index.js";
+export { EntitlementMap, resourceAllowed } from "./entitlement/index.js";
 export type { Grant } from "./entitlement/index.js";
 export { TokenBucketLimiter, enforceRate, stepBucket } from "./rate/index.js";
 export type { RateStore, RateDecision, BucketState } from "./rate/index.js";
@@ -19,6 +19,8 @@ export {
   Router,
   filterToolsList,
   filterPromptsList,
+  filterResourcesList,
+  filterResourceTemplatesList,
   filterInitializeResult,
   parseJsonRpc,
   parseSseJson,

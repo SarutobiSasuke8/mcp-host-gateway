@@ -11,16 +11,28 @@ export interface Grant {
   prompts: ReadonlySet<string>;
   /** True when the upstream has a prompts_allow list, so prompts/* is routed at all. */
   promptsRouted: boolean;
+  /**
+   * Resource URI prefixes this caller may list and read. A resource is allowed when its URI starts
+   * with any prefix. Empty when the upstream has no resources_allow.
+   */
+  resources: readonly string[];
+  /** True when the upstream has a resources_allow list, so resources/* is routed at all. */
+  resourcesRouted: boolean;
   rpm: number;
+}
+
+/** True when `uri` starts with any of the allowed prefixes. Plain string prefix match. */
+export function resourceAllowed(prefixes: readonly string[], uri: string): boolean {
+  return prefixes.some((prefix) => uri.startsWith(prefix));
 }
 
 /**
  * Entitlement map: identity -> plan -> allowed upstreams and tools.
  *
  * The plan comes from the token (JWT claim, or static token entry). The map of plans is static
- * config. Unknown plans, upstreams not on the plan, and tools or prompts not on the upstream's
- * allow list are all denied with an explicit reason. Prompts are deny by default: an upstream
- * without prompts_allow grants none.
+ * config. Unknown plans, upstreams not on the plan, and tools, prompts or resources not on the
+ * upstream's allow list are all denied with an explicit reason. Prompts and resources are deny by
+ * default: an upstream without prompts_allow or resources_allow grants none.
  */
 export class EntitlementMap {
   private readonly plans: Record<string, PlanConfig>;
@@ -53,7 +65,9 @@ export class EntitlementMap {
     const tools = new Set(narrowed ?? upstream.tools_allow);
     const promptsRouted = upstream.prompts_allow !== undefined;
     const prompts = new Set(promptsRouted ? (plan.prompts?.[upstreamName] ?? upstream.prompts_allow) : []);
-    return { plan: plan.name, upstream: upstreamName, tools, prompts, promptsRouted, rpm: plan.rpm };
+    const resourcesRouted = upstream.resources_allow !== undefined;
+    const resources = resourcesRouted ? [...(plan.resources?.[upstreamName] ?? upstream.resources_allow ?? [])] : [];
+    return { plan: plan.name, upstream: upstreamName, tools, prompts, promptsRouted, resources, resourcesRouted, rpm: plan.rpm };
   }
 
   /** Throw if `tool` is outside the grant. */
@@ -74,6 +88,17 @@ export class EntitlementMap {
         plan: grant.plan,
         upstream: grant.upstream,
         prompt,
+      });
+    }
+  }
+
+  /** Throw if `uri` is outside every granted prefix. Same error shape as an un-granted tool. */
+  assertResource(grant: Grant, uri: string): void {
+    if (!resourceAllowed(grant.resources, uri)) {
+      throw forbidden(`resource "${uri}" is not available on plan "${grant.plan}" for upstream "${grant.upstream}"`, {
+        plan: grant.plan,
+        upstream: grant.upstream,
+        resource: uri,
       });
     }
   }
