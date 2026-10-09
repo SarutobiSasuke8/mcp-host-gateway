@@ -2,6 +2,7 @@ import type { UpstreamConfig } from "../config.js";
 import type { JsonRpcId } from "../edge/errors.js";
 import { forbidden, invalidRequest, methodNotFound, upstreamUnavailable } from "../edge/errors.js";
 import type { Grant } from "../entitlement/index.js";
+import { resourceAllowed } from "../entitlement/index.js";
 import type { EntitlementMap } from "../entitlement/index.js";
 
 export interface JsonRpcRequest {
@@ -13,7 +14,9 @@ export interface JsonRpcRequest {
 
 /**
  * Methods the gateway will forward. Everything else is refused before it reaches an upstream.
- * `prompts/*` is only routed for an upstream that has a `prompts_allow` list (see authoriseRequest).
+ * `prompts/*` is only routed for an upstream that has a `prompts_allow` list, and `resources/*`
+ * only for one with a `resources_allow` list (see authoriseRequest). `resources/subscribe` and
+ * `resources/unsubscribe` are never routed: the gateway relays no server-initiated stream.
  */
 export const ROUTED_METHODS: ReadonlySet<string> = new Set([
   "initialize",
@@ -22,6 +25,9 @@ export const ROUTED_METHODS: ReadonlySet<string> = new Set([
   "tools/call",
   "prompts/list",
   "prompts/get",
+  "resources/list",
+  "resources/templates/list",
+  "resources/read",
   "notifications/initialized",
   "notifications/cancelled",
 ]);
@@ -76,15 +82,23 @@ export function authoriseRequest(entitlements: EntitlementMap, grant: Grant, req
   // Deny by default: an upstream without prompts_allow does not route prompts/* at all, exactly
   // as before prompts were supported.
   if (request.method.startsWith("prompts/") && !grant.promptsRouted) throw methodNotFound(request.method);
+  // Likewise resources/*: without resources_allow the methods do not exist, and a read outside the
+  // granted prefixes is forbidden in the same shape as a tool outside the plan.
+  if (request.method.startsWith("resources/") && !grant.resourcesRouted) throw methodNotFound(request.method);
   if (request.method === "tools/call") entitlements.assertTool(grant, requireName(request));
   if (request.method === "prompts/get") entitlements.assertPrompt(grant, requireName(request));
+  if (request.method === "resources/read") entitlements.assertResource(grant, requireParam(request, "uri"));
+}
+
+function requireParam(request: JsonRpcRequest, key: "name" | "uri"): string {
+  const params = request.params;
+  const value = params && typeof params === "object" ? (params as Record<string, unknown>)[key] : undefined;
+  if (typeof value !== "string" || value.length === 0) throw invalidRequest(`${request.method} requires params.${key}`);
+  return value;
 }
 
 function requireName(request: JsonRpcRequest): string {
-  const params = request.params;
-  const name = params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
-  if (typeof name !== "string" || name.length === 0) throw invalidRequest(`${request.method} requires params.name`);
-  return name;
+  return requireParam(request, "name");
 }
 
 function filterNamedList(payload: unknown, key: "tools" | "prompts", allowed: ReadonlySet<string>): unknown {
@@ -113,11 +127,54 @@ export function filterPromptsList(payload: unknown, grant: Grant): unknown {
   return filterNamedList(payload, "prompts", grant.prompts);
 }
 
+function filterUriList(
+  payload: unknown,
+  key: "resources" | "resourceTemplates",
+  uriKey: "uri" | "uriTemplate",
+  keep: (uri: string) => boolean,
+): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const message = payload as { result?: Record<string, unknown> };
+  const list = message.result?.[key];
+  if (!message.result || !Array.isArray(list)) return payload;
+  return {
+    ...message,
+    result: {
+      ...message.result,
+      [key]: (list as Array<Record<string, unknown> | null>).filter((item) => {
+        const uri = item?.[uriKey];
+        return typeof uri === "string" && keep(uri);
+      }),
+    },
+  };
+}
+
+/** Drop resources whose URI is outside every granted prefix. Unknown shapes pass through untouched. */
+export function filterResourcesList(payload: unknown, grant: Grant): unknown {
+  return filterUriList(payload, "resources", "uri", (uri) => resourceAllowed(grant.resources, uri));
+}
+
+/**
+ * Drop resource templates that could expand outside the granted prefixes. A template is kept
+ * only when its literal head (everything before the first `{`) starts with a granted prefix, so
+ * every expansion of a kept template starts with that prefix too. Reads are still checked one
+ * by one. Unknown shapes pass through untouched.
+ */
+export function filterResourceTemplatesList(payload: unknown, grant: Grant): unknown {
+  return filterUriList(payload, "resourceTemplates", "uriTemplate", (template) => {
+    const brace = template.indexOf("{");
+    const head = brace === -1 ? template : template.slice(0, brace);
+    return resourceAllowed(grant.resources, head);
+  });
+}
+
 /**
  * Rewrite an initialize result so `capabilities` only advertises what the gateway routes for
- * this caller: `tools` (when the upstream offers it) and `prompts` (only when the caller's grant
- * has at least one prompt). `resources`, `completions`, `logging`, `experimental` and any
- * capability the gateway does not know are dropped. Unknown shapes are passed through untouched.
+ * this caller: `tools` (when the upstream offers it), `prompts` (only when the caller's grant
+ * has at least one prompt) and `resources` (only when the grant has at least one prefix, and
+ * never with `subscribe`, which the gateway does not route). `completions`, `logging`,
+ * `experimental` and any capability the gateway does not know are dropped. Unknown shapes are
+ * passed through untouched.
  */
 export function filterInitializeResult(payload: unknown, grant: Grant): unknown {
   if (!payload || typeof payload !== "object") return payload;
@@ -129,8 +186,18 @@ export function filterInitializeResult(payload: unknown, grant: Grant): unknown 
     const caps = offered as Record<string, unknown>;
     if (caps.tools !== undefined) capabilities.tools = caps.tools;
     if (caps.prompts !== undefined && grant.prompts.size > 0) capabilities.prompts = caps.prompts;
+    if (caps.resources !== undefined && grant.resources.length > 0) capabilities.resources = withoutSubscribe(caps.resources);
   }
   return { ...message, result: { ...message.result, capabilities } };
+}
+
+function withoutSubscribe(resources: unknown): unknown {
+  if (!resources || typeof resources !== "object") return resources;
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(resources as Record<string, unknown>)) {
+    if (key !== "subscribe") kept[key] = value;
+  }
+  return kept;
 }
 
 /** Result reshapers for the methods whose answers depend on the caller's grant. */
@@ -138,6 +205,8 @@ export const RESHAPERS: Readonly<Record<string, (payload: unknown, grant: Grant)
   initialize: filterInitializeResult,
   "tools/list": filterToolsList,
   "prompts/list": filterPromptsList,
+  "resources/list": filterResourcesList,
+  "resources/templates/list": filterResourceTemplatesList,
 };
 
 /**
@@ -299,8 +368,8 @@ export class Router {
 
     const reshape = response.status === 200 ? RESHAPERS[request.method] : undefined;
 
-    // SSE answers are relayed as they arrive. For initialize, tools/list and prompts/list the
-    // final result event is re-shaped to the grant on the way through.
+    // SSE answers are relayed as they arrive. For initialize and the list methods the final
+    // result event is re-shaped to the grant on the way through.
     if (contentType.includes("text/event-stream") && response.body) {
       const stream = relaySse(readBody(response.body), reshape ? (message) => reshape(message, grant) : undefined);
       const result: ForwardResult = { status: response.status, contentType: "text/event-stream", body: guardStream(stream, upstreamName, timeout, signal), streamed: true };

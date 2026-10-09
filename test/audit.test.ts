@@ -23,7 +23,7 @@ function assertSchema(line: string): Record<string, unknown> {
   assert.equal(typeof entry.ts, "string");
   assert.ok(!Number.isNaN(Date.parse(entry.ts as string)));
   assert.match(entry.request_id as string, UUID);
-  for (const key of ["subject", "plan", "method", "tool", "prompt", "reason"]) {
+  for (const key of ["subject", "plan", "method", "tool", "prompt", "resource", "reason"]) {
     assert.ok(entry[key] === null || typeof entry[key] === "string", `${key} is string or null`);
   }
   assert.equal(typeof entry.upstream, "string");
@@ -56,8 +56,9 @@ void test("one schema-conformant audit line per routed call, with no tokens, cre
     calls.push(rpc(base, "jobscout", { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_listing", arguments: { q: ARG_CANARY } } }, bearer(FREE_TOKEN)));
     // deny: unauthenticated with a wrong token
     calls.push(rpc(base, "jobscout", { jsonrpc: "2.0", id: 3, method: "ping" }, bearer(WRONG_TOKEN)));
-    // deny: un-routed method
-    calls.push(rpc(base, "jobscout", { jsonrpc: "2.0", id: 4, method: "resources/read", params: { uri: ARG_CANARY } }, bearer(PAID_TOKEN)));
+    // deny: un-routed method, with the canary in its params (resources/read is routed since #9;
+    // its uri is audited as `resource`, exactly as a tool or prompt name is)
+    calls.push(rpc(base, "jobscout", { jsonrpc: "2.0", id: 4, method: "completion/complete", params: { argument: { name: "q", value: ARG_CANARY } } }, bearer(PAID_TOKEN)));
     await Promise.all(calls);
     // rate_limited: free plan rpm 3, one spent above, so two pings pass and the third is limited
     for (let i = 0; i < 3; i += 1) await rpc(base, "jobscout", { jsonrpc: "2.0", id: 10 + i, method: "ping" }, bearer(FREE_TOKEN));
@@ -81,7 +82,7 @@ void test("one schema-conformant audit line per routed call, with no tokens, cre
     const allowedEntry = entries.find((e) => e.request_id === allowed.headers.get("x-request-id"))!;
     assert.deepEqual(
       { ...allowedEntry, ts: undefined, request_id: undefined, duration_ms: undefined },
-      { ts: undefined, request_id: undefined, subject: "user-paid", plan: "paid", upstream: "jobscout", method: "tools/call", tool: "search_jobs", prompt: null, decision: "allow", reason: null, status: 200, duration_ms: undefined },
+      { ts: undefined, request_id: undefined, subject: "user-paid", plan: "paid", upstream: "jobscout", method: "tools/call", tool: "search_jobs", prompt: null, resource: null, decision: "allow", reason: null, status: 200, duration_ms: undefined },
     );
 
     const decisions = entries.map((e) => e.decision).sort();
@@ -112,7 +113,7 @@ void test("file sink appends one line per entry and redacts token-shaped values 
   try {
     const path = join(dir, "logs", "audit.jsonl");
     const audit = createAuditLog({ sink: "file", path });
-    const base = { request_id: "00000000-0000-4000-8000-000000000000", subject: "s", plan: "p", upstream: "u", method: "tools/call", prompt: null, decision: "deny" as const, reason: null, status: 403, duration_ms: 1 };
+    const base = { request_id: "00000000-0000-4000-8000-000000000000", subject: "s", plan: "p", upstream: "u", method: "tools/call", prompt: null, resource: null, decision: "deny" as const, reason: null, status: 403, duration_ms: 1 };
     audit.record({ ...base, tool: `Bearer ${PAID_TOKEN}` });
     audit.record({ ...base, tool: JWT_LIKE });
     audit.record({ ...base, tool: "x".repeat(1000) });

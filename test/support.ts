@@ -18,6 +18,19 @@ export const STUB_PROMPTS = [
   { name: "internal_debug", description: "Never exposed" },
 ];
 
+export const STUB_RESOURCES = [
+  { uri: "docs://public/readme", name: "README", mimeType: "text/markdown" },
+  { uri: "docs://public/schema.json", name: "Schema", mimeType: "application/json" },
+  { uri: "docs://internal/runbook", name: "Runbook", mimeType: "text/markdown" },
+  { uri: "jobs://snapshots/latest", name: "Latest snapshot", mimeType: "application/json" },
+];
+
+export const STUB_RESOURCE_TEMPLATES = [
+  { uriTemplate: "docs://public/{slug}", name: "Public doc" },
+  { uriTemplate: "docs://internal/{slug}", name: "Internal doc" },
+  { uriTemplate: "jobs://{kind}/latest", name: "Any snapshot" },
+];
+
 /** Everything a full-featured upstream might advertise, including capabilities the gateway refuses. */
 export const FULL_CAPABILITIES = {
   tools: { listChanged: false },
@@ -35,9 +48,9 @@ export interface StubUpstream {
 }
 
 /**
- * In-process Streamable HTTP MCP stub. Answers initialize, ping, tools/list and tools/call with
- * JSON responses, and records every request so tests can assert on what the gateway forwarded.
- * With `sse: true` it frames the tools/list response as text/event-stream.
+ * In-process Streamable HTTP MCP stub. Answers initialize, ping, tools, prompts and resources
+ * methods with JSON responses, and records every request so tests can assert on what the gateway
+ * forwarded. With `sse: true` it frames initialize and the list responses as text/event-stream.
  */
 export async function startStubUpstream(
   options: { sse?: boolean; status?: number; capabilities?: Record<string, unknown> } = {},
@@ -60,9 +73,18 @@ export async function startStubUpstream(
         res.end(JSON.stringify({ error: "upstream says no" }));
         return;
       }
-      const message = body as { id?: unknown; method?: string; params?: { name?: string; arguments?: unknown } };
+      const message = body as { id?: unknown; method?: string; params?: { name?: string; uri?: string; arguments?: unknown } };
       let result: unknown;
       switch (message.method) {
+        case "resources/list":
+          result = { resources: STUB_RESOURCES };
+          break;
+        case "resources/templates/list":
+          result = { resourceTemplates: STUB_RESOURCE_TEMPLATES };
+          break;
+        case "resources/read":
+          result = { contents: [{ uri: message.params?.uri, mimeType: "text/plain", text: `contents of ${message.params?.uri}` }] };
+          break;
         case "initialize":
           result = {
             protocolVersion: "2025-06-18",
@@ -91,7 +113,8 @@ export async function startStubUpstream(
           return;
       }
       const reply = { jsonrpc: "2.0", id: message.id ?? null, result };
-      if (options.sse && (message.method === "tools/list" || message.method === "initialize" || message.method === "prompts/list")) {
+      const listed = ["initialize", "tools/list", "prompts/list", "resources/list", "resources/templates/list"];
+      if (options.sse && listed.includes(message.method ?? "")) {
         res.writeHead(200, { "Content-Type": "text/event-stream", "Mcp-Session-Id": "stub-session" });
         res.end(`event: message\ndata: ${JSON.stringify(reply)}\n\n`);
         return;

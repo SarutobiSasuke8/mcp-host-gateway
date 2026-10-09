@@ -72,7 +72,7 @@ The gateway container exits non-zero, and Docker keeps restarting it without eve
 
 - no config file is mounted at `GATEWAY_CONFIG`, or the config is invalid;
 - `auth.issuer` is missing, or the JWKS endpoint is unreachable or publishes no keys;
-- a plan references an upstream, tool or prompt that is not configured;
+- a plan references an upstream, tool, prompt or resource prefix that is not configured;
 - the SQLite rate store cannot be opened (for example the volume is read-only).
 
 Caddy depends on the gateway being healthy, so a gateway that cannot start never receives traffic.

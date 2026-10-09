@@ -5,6 +5,14 @@ import { z } from "zod";
 
 const toolName = z.string().min(1).max(128);
 const promptName = z.string().min(1).max(128);
+// A resource URI prefix: plain string prefix, no template syntax, no whitespace. Matching is
+// `uri.startsWith(prefix)`, so a prefix should end at a boundary the upstream's URIs respect
+// (a scheme, a trailing slash, a full path).
+const resourcePrefix = z
+  .string()
+  .min(1)
+  .max(2048)
+  .refine((value) => !/[\s{}]/.test(value), { message: "resource prefixes are plain URI prefixes without whitespace or braces" });
 const upstreamName = z.string().regex(/^[a-z0-9_-]+$/, "upstream names are lower-case [a-z0-9_-]");
 
 const upstreamSchema = z.object({
@@ -13,6 +21,9 @@ const upstreamSchema = z.object({
   // Prompts the gateway may route for this upstream. Absent means prompts/* is not routed at all
   // for this upstream (deny by default) and the prompts capability is never advertised.
   prompts_allow: z.array(promptName).min(1).optional(),
+  // Resource URI prefixes the gateway may route for this upstream. Absent means resources/* is
+  // not routed at all (deny by default) and the resources capability is never advertised.
+  resources_allow: z.array(resourcePrefix).min(1).optional(),
   // Name of an env var holding the full Authorization header value to send upstream.
   auth_header_env: z.string().min(1).optional(),
   timeout_ms: z.number().int().positive().max(120_000).default(30_000),
@@ -26,6 +37,10 @@ const planSchema = z.object({
   // Optional per-plan narrowing of an upstream's prompts_allow. Absent means "all of
   // prompts_allow"; an empty list means "no prompts on this plan".
   prompts: z.record(upstreamName, z.array(promptName)).optional(),
+  // Optional per-plan narrowing of an upstream's resources_allow. Each prefix must sit inside one
+  // of the upstream's prefixes. Absent means "all of resources_allow"; an empty list means "no
+  // resources on this plan".
+  resources: z.record(upstreamName, z.array(resourcePrefix)).optional(),
 });
 
 const jwtAuthSchema = z.object({
@@ -106,7 +121,8 @@ export class ConfigError extends Error {
 
 /**
  * Parse and validate a config object. Fails closed: any missing auth issuer, missing upstream,
- * or plan that references an unknown upstream or tool is an error, not a warning.
+ * or plan that references an unknown upstream, tool, prompt or resource prefix is an error, not
+ * a warning.
  */
 export function parseConfig(raw: unknown): GatewayConfig {
   const result = configSchema.safeParse(raw);
@@ -158,6 +174,21 @@ export function parseConfig(raw: unknown): GatewayConfig {
       for (const prompt of prompts) {
         if (!(upstream.prompts_allow ?? []).includes(prompt)) {
           throw new ConfigError(`invalid gateway config: entitlements.${plan}.prompts.${name} lists "${prompt}" which is not in upstreams.${name}.prompts_allow`);
+        }
+      }
+    }
+    for (const [name, prefixes] of Object.entries(entitlement.resources ?? {})) {
+      const upstream = config.upstreams[name];
+      if (!upstream) {
+        throw new ConfigError(`invalid gateway config: entitlements.${plan}.resources references unknown upstream "${name}"`);
+      }
+      if (!entitlement.upstreams.includes(name)) {
+        throw new ConfigError(`invalid gateway config: entitlements.${plan}.resources.${name} is set but "${name}" is not in that plan's upstreams`);
+      }
+      for (const prefix of prefixes) {
+        // A plan prefix may equal or extend an upstream prefix, never widen it.
+        if (!(upstream.resources_allow ?? []).some((allowed) => prefix.startsWith(allowed))) {
+          throw new ConfigError(`invalid gateway config: entitlements.${plan}.resources.${name} lists "${prefix}" which is not within upstreams.${name}.resources_allow`);
         }
       }
     }

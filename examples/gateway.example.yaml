@@ -48,12 +48,19 @@ upstreams:
     # Prompts are deny by default. Without prompts_allow, prompts/* is not routed for this
     # upstream and the prompts capability is not advertised.
     prompts_allow: [jobscout_setup, jobscout_find_jobs]
+    # JobScout exposes no resources, so there is no resources_allow here: resources/* is not
+    # routed for this upstream and the resources capability is not advertised.
     # auth_header_env: JOBSCOUT_UPSTREAM_AUTH   # env var holding the full Authorization header value
     # timeout_ms: 30000
   source_pack:
     # Illustrative sibling upstream (not JobScout). No prompts_allow, so no prompts are routed.
     url: https://source-pack.internal/mcp
     tools_allow: [list_sources, fetch_source]
+    # Resources are deny by default too. resources_allow is a list of URI prefixes (plain string
+    # prefixes, no template braces): resources/list and resources/templates/list are filtered to
+    # them, resources/read outside them is forbidden, and resources/subscribe is never routed.
+    # End each prefix at a boundary the upstream's URIs respect, usually a trailing slash.
+    resources_allow: ["docs://public/", "sources://catalogue/"]
 
 entitlements:
   free:
@@ -68,6 +75,10 @@ entitlements:
   paid:
     upstreams: [jobscout, source_pack]
     rpm: 300
+    # A plan may narrow an upstream's resources_allow to prefixes inside it. Absent means all of
+    # resources_allow; [] would mean no resources on this plan.
+    # resources:
+    #   source_pack: ["docs://public/"]
 
 rate:
   scope: identity   # or identity_upstream for one bucket per caller per upstream
