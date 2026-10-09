@@ -13,6 +13,12 @@ auth:
   audience: mcp-host-gateway
   # jwks_url: https://accounts.example.com/.well-known/jwks.json
   plan_claim: plan
+  # Defaults: revoked tokens refused within 5 s, new tokens accepted on first use (README "Token freshness").
+  # jwks_refresh_seconds: 5
+  # jwks_cooldown_seconds: 1
+  # jwks_max_stale_seconds: 60
+  # 401s point clients at <issuer>/.well-known/oauth-protected-resource/mcp/<upstream> unless set:
+  # resource_metadata_url: https://accounts.example.com/.well-known/oauth-protected-resource/mcp/{upstream}
 
 upstreams:
   jobscout:

@@ -26,7 +26,7 @@ client  ──Bearer──▶  gateway  ──▶  auth  ──▶  entitlement 
 
 | Stage | Behaviour |
 | --- | --- |
-| Auth | Bearer JWT verified against the issuer's JWKS (`jose`), with `iss` and `aud` checked. Or `auth.mode: static` for development, tokens from an env var. Missing or invalid tokens get a JSON-RPC error `-32001` with HTTP 401. |
+| Auth | Bearer JWT verified against the issuer's JWKS (`jose`), with `iss` and `aud` checked. Or `auth.mode: static` for development, tokens from an env var. Missing or invalid tokens get a JSON-RPC error `-32001` with HTTP 401 and a `WWW-Authenticate: Bearer` challenge whose `resource_metadata` points MCP clients at the sign-in server. Keys are cached for seconds, not minutes, so revoked and newly issued tokens take effect quickly; see "Token freshness". |
 | Entitlement | Identity to plan (JWT `plan` claim, or the static token entry) to allowed upstreams, tools and prompts. Anything else gets `-32003` with HTTP 403 and a message naming the plan, upstream and tool or prompt. Prompts are deny by default: an upstream needs `prompts_allow` before any prompt is routed. |
 | Rate limit | Token bucket per identity (optionally per identity and upstream), capacity and refill set by the plan's `rpm`, kept in a `RateStore`: SQLite (WAL) shared across processes and restarts in production, in-memory for tests. Every authenticated call counts, including ones then refused. Over quota gets `-32029` with HTTP 429 and `Retry-After`. |
 | Router | Forwards `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` and `notifications/cancelled` to the upstream over Streamable HTTP via `fetch`, plus `prompts/list` and `prompts/get` for upstreams with a `prompts_allow` list. `tools/list` and `prompts/list` results are filtered to the grant, whether the upstream answers in JSON or SSE framing. SSE answers are relayed event by event as they arrive (progress notifications reach the client during a long tool call), with the final result of `initialize`, `tools/list` and `prompts/list` re-shaped on the way through. A client that disconnects aborts the upstream request. Other methods get `-32601`. `Mcp-Session-Id` and `MCP-Protocol-Version` pass through both ways. HTTP `DELETE` (session end) is forwarded. |
@@ -83,6 +83,8 @@ auth:
   issuer: https://accounts.example.com     # jwt mode (default when mode is omitted)
   audience: mcp-host-gateway
   # jwks_url, plan_claim (default "plan"), default_plan (omit to deny tokens with no plan)
+  # jwks_refresh_seconds: 5, jwks_cooldown_seconds: 1, jwks_max_stale_seconds: 60 (see "Token freshness")
+  # resource_metadata_url (default <issuer>/.well-known/oauth-protected-resource/mcp/{upstream})
 upstreams:
   jobscout:
     url: https://jobscout.internal/mcp
@@ -109,6 +111,30 @@ The full annotated example is `examples/gateway.example.yaml`. Its JobScout tool
 Prompt rules mirror tool rules: a plan's `prompts` narrowing may only name prompts in that upstream's `prompts_allow`, and only for upstreams on that plan, or the config is rejected at startup. Unlike `tools`, a plan may narrow prompts to an empty list, which hides the `prompts` capability from that plan's callers. Set `GATEWAY_CONFIG` to the file path (default `./gateway.yaml`).
 
 Environment variables are listed in `.env.example`. None are committed with values.
+
+## Token freshness
+
+Revocation at the issuer works by removing a key from its JWKS: JobScout Pro, for example, signs each personal access token with its own key and drops that key when the token is revoked. So how quickly a revoked token stops working, and how quickly a new one starts, is decided by how long the gateway caches the JWKS. The gateway polls the JWKS on demand with three bounds:
+
+| Setting (`auth.*`) | Default | Effect |
+| --- | --- | --- |
+| `jwks_refresh_seconds` | 5 | No token is verified against a key set older than this. The first call after it expires refetches before verifying (one fetch shared by every concurrent call). A revoked token stops working within this many seconds. |
+| `jwks_cooldown_seconds` | 1 | A token whose key id is not in the cache triggers an immediate refetch, so a new token works on its first call. Refetches started this way, and retries after a failed fetch, are at least this far apart, so a stream of made-up key ids cannot flood the issuer. Worst case for a new token: this many seconds. |
+| `jwks_max_stale_seconds` | 60 | If the issuer cannot be reached, the last good key set is still used for this long, then every call gets `-32004` with HTTP 503 and `Retry-After` until the issuer answers. Set it equal to `jwks_refresh_seconds` to fail closed at once. During an outage, revocation latency rises to this value. |
+
+Measured locally with the defaults (`test/token-freshness.test.ts`, real clock, stub issuer): a revoked token was refused after about 5 s and a new token accepted after about 1 s. Before this change the gateway used jose's remote key set defaults: a 10 minute cache and a 30 second cooldown, which is what JobScout Pro measured.
+
+A poll was chosen over a signed revocation webhook: it needs no shared secret, no new endpoint and no change at the issuer, it works across several gateway processes without coordination, and at one small JWKS request per process every 5 seconds of traffic the cost is negligible. Short-lived OAuth access tokens (minutes) are not revoked this way; they expire, and the issuer refuses to refresh them.
+
+### Pointing clients at the sign-in server
+
+Every 401 carries an RFC 6750 Bearer challenge with the RFC 9728 `resource_metadata` parameter that the MCP authorisation spec asks for, so a client can discover the authorisation server from the 401 alone:
+
+```
+WWW-Authenticate: Bearer realm="mcp-host-gateway", resource_metadata="https://pro.example.com/.well-known/oauth-protected-resource/mcp/jobscout", error="invalid_token", error_description="token expired"
+```
+
+`error` is omitted when the request had no `Authorization` header at all, `invalid_request` when the header is malformed and `invalid_token` when the token is rejected. The URL defaults to `<issuer>/.well-known/oauth-protected-resource/mcp/<upstream>`, which suits an issuer on the gateway's public host that publishes metadata per `/mcp/<upstream>` resource (JobScout Pro does). Otherwise set `auth.resource_metadata_url`; `{upstream}` in it is replaced by the upstream name. Static mode has no issuer and sends no `resource_metadata`.
 
 ## Rate limits
 
@@ -186,6 +212,7 @@ Every rejection is a JSON-RPC 2.0 error object so an MCP client can show the rea
 | -32600 | 400 | Invalid JSON-RPC request (batches, non-JSON bodies, oversize bodies) |
 | -32601 | 404 | Method not routed (including `prompts/*` on an upstream without `prompts_allow`), or unknown upstream path |
 | -32002 | 502 | Upstream unreachable, timed out, or returned 5xx |
+| -32004 | 503 | Token cannot be checked: the issuer's JWKS has been unreachable for longer than `jwks_max_stale_seconds`. `Retry-After` header set |
 
 These are HTTP error statuses with a JSON-RPC error body. The official TypeScript client surfaces them as an `SdkHttpError` whose message contains the JSON-RPC body, so the code and reason reach the caller (see `test/e2e-jobscout.test.ts`).
 
@@ -219,6 +246,7 @@ These are HTTP error statuses with a JSON-RPC error body. The official TypeScrip
 - [x] Single-VPS deploy recipe with Caddy for TLS and JobScout as the example upstream, placeholders only. (`docs/DEPLOYMENT.md`, `deploy/`)
 - [x] Audit log with a documented schema; a test asserts no token or body leaks. (`test/audit.test.ts`)
 - [x] Offline end-to-end test against the real JobScout HTTP server (pinned by git SHA) with the official MCP client. (`test/e2e-jobscout.test.ts`)
+- [x] Revoked tokens refused and new tokens accepted within seconds; 401s carry `WWW-Authenticate` with `resource_metadata`. (#7, `test/token-freshness.test.ts`)
 
 Deferred, with reasons:
 

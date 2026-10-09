@@ -37,6 +37,19 @@ const jwtAuthSchema = z.object({
   plan_claim: z.string().min(1).default("plan"),
   // Plan to assume when the token carries no plan claim. Absent means such tokens are denied.
   default_plan: z.string().min(1).optional(),
+  // Key set freshness. A revoked token (its key removed from the JWKS) stops working within
+  // jwks_refresh_seconds; a token signed by a new key works on its first call unless another
+  // refetch started within jwks_cooldown_seconds. See README "Token freshness".
+  jwks_refresh_seconds: z.number().positive().max(3_600).default(5),
+  jwks_cooldown_seconds: z.number().nonnegative().max(60).default(1),
+  // How long the last good key set may be used while the issuer is unreachable. Past this,
+  // every call gets 503 until the issuer answers. Must be at least jwks_refresh_seconds.
+  jwks_max_stale_seconds: z.number().positive().max(86_400).default(60),
+  // RFC 9728 protected resource metadata URL sent in every 401's WWW-Authenticate header so MCP
+  // clients can find the sign-in server. "{upstream}" is replaced by the upstream name. Defaults
+  // to <issuer>/.well-known/oauth-protected-resource/mcp/{upstream}, which suits an issuer that
+  // shares the gateway's public host and publishes metadata for each /mcp/<upstream> resource.
+  resource_metadata_url: z.string().url().optional(),
 });
 
 const staticAuthSchema = z.object({
@@ -109,6 +122,9 @@ export function parseConfig(raw: unknown): GatewayConfig {
   // auth block without a mode must land here as JWT and still be checked for the issuer.
   if (config.auth.mode === "jwt" && config.auth.issuer.trim() === "") {
     throw new ConfigError("invalid gateway config: auth.issuer is required in jwt mode");
+  }
+  if (config.auth.mode === "jwt" && config.auth.jwks_max_stale_seconds < config.auth.jwks_refresh_seconds) {
+    throw new ConfigError("invalid gateway config: auth.jwks_max_stale_seconds must be at least auth.jwks_refresh_seconds");
   }
 
   for (const [plan, entitlement] of Object.entries(config.entitlements)) {

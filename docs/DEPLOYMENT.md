@@ -77,6 +77,8 @@ The gateway container exits non-zero, and Docker keeps restarting it without eve
 
 Caddy depends on the gateway being healthy, so a gateway that cannot start never receives traffic.
 
+Once running, the gateway refetches the issuer's JWKS every few seconds of traffic (README "Token freshness"). If the issuer stays unreachable for longer than `auth.jwks_max_stale_seconds` (default 60), calls get HTTP 503 with `Retry-After` until it answers again; `/health` and `/ready` are unaffected.
+
 ## Health
 
 - `GET /health` returns `{"status":"ok"}` once the process is up. Used by the Docker healthcheck.

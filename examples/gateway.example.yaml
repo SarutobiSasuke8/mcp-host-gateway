@@ -17,6 +17,13 @@ auth:
   # jwks_url: https://accounts.example.com/.well-known/jwks.json   # default is <issuer>/.well-known/jwks.json
   # plan_claim: plan
   # default_plan: free        # if omitted, tokens with no plan claim are denied
+  # Token freshness (README "Token freshness"): a revoked token stops working within
+  # jwks_refresh_seconds; a new one works on its first call, or within jwks_cooldown_seconds.
+  # jwks_refresh_seconds: 5
+  # jwks_cooldown_seconds: 1
+  # jwks_max_stale_seconds: 60   # issuer unreachable this long: calls get 503 until it answers
+  # Sent in every 401 so MCP clients can find the sign-in server. {upstream} is the upstream name.
+  # resource_metadata_url: https://accounts.example.com/.well-known/oauth-protected-resource/mcp/{upstream}
 
 # Development and tests: opaque tokens from an env var, never from this file.
 #   GATEWAY_STATIC_TOKENS=dev-free-token-0123456789:dev-free:free,dev-paid-token-0123456789:dev-paid:paid

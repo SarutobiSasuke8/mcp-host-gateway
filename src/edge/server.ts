@@ -151,7 +151,7 @@ export function createGateway(config: GatewayConfig, options: GatewayOptions = {
         return;
       }
 
-      identity = await authenticator.authenticate(headerValue(req, "authorization"));
+      identity = await authenticator.authenticate(headerValue(req, "authorization"), upstreamName);
       grant = entitlements.grant(identity, upstreamName);
       const sessionId = headerValue(req, "mcp-session-id");
 
