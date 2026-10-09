@@ -2,9 +2,12 @@ export { parseConfig, parseConfigYaml, loadConfigFile, ConfigError } from "./con
 export type { GatewayConfig, UpstreamConfig, PlanConfig, AuthConfig, RateConfig, AuditConfig } from "./config.js";
 export { createGateway, createRateStore, CLIENT_CLOSED_STATUS } from "./edge/server.js";
 export type { Gateway, GatewayOptions } from "./edge/server.js";
-export { GatewayError, ErrorCode } from "./edge/errors.js";
+export { GatewayError, ErrorCode, bearerChallenge } from "./edge/errors.js";
+export type { BearerChallenge, BearerErrorCode } from "./edge/errors.js";
 export { createAuthenticator, JwtAuthenticator, StaticAuthenticator, parseStaticTokens } from "./auth/index.js";
-export type { Authenticator, Identity } from "./auth/index.js";
+export type { Authenticator, Identity, JwtAuthenticatorOptions } from "./auth/index.js";
+export { JwksCache, JwksFetchError, JwksUnavailableError } from "./auth/jwks.js";
+export type { JwksCacheOptions } from "./auth/jwks.js";
 export { EntitlementMap } from "./entitlement/index.js";
 export type { Grant } from "./entitlement/index.js";
 export { TokenBucketLimiter, enforceRate, stepBucket } from "./rate/index.js";
