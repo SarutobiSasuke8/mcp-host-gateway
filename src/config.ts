@@ -4,11 +4,15 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 const toolName = z.string().min(1).max(128);
+const promptName = z.string().min(1).max(128);
 const upstreamName = z.string().regex(/^[a-z0-9_-]+$/, "upstream names are lower-case [a-z0-9_-]");
 
 const upstreamSchema = z.object({
   url: z.string().url(),
   tools_allow: z.array(toolName).min(1),
+  // Prompts the gateway may route for this upstream. Absent means prompts/* is not routed at all
+  // for this upstream (deny by default) and the prompts capability is never advertised.
+  prompts_allow: z.array(promptName).min(1).optional(),
   // Name of an env var holding the full Authorization header value to send upstream.
   auth_header_env: z.string().min(1).optional(),
   timeout_ms: z.number().int().positive().max(120_000).default(30_000),
@@ -19,6 +23,9 @@ const planSchema = z.object({
   rpm: z.number().int().positive(),
   // Optional per-plan narrowing of an upstream's tools_allow. Absent means "all of tools_allow".
   tools: z.record(upstreamName, z.array(toolName).min(1)).optional(),
+  // Optional per-plan narrowing of an upstream's prompts_allow. Absent means "all of
+  // prompts_allow"; an empty list means "no prompts on this plan".
+  prompts: z.record(upstreamName, z.array(promptName)).optional(),
 });
 
 const jwtAuthSchema = z.object({
@@ -107,6 +114,20 @@ export function parseConfig(raw: unknown): GatewayConfig {
       for (const tool of tools) {
         if (!upstream.tools_allow.includes(tool)) {
           throw new ConfigError(`invalid gateway config: entitlements.${plan}.tools.${name} lists "${tool}" which is not in upstreams.${name}.tools_allow`);
+        }
+      }
+    }
+    for (const [name, prompts] of Object.entries(entitlement.prompts ?? {})) {
+      const upstream = config.upstreams[name];
+      if (!upstream) {
+        throw new ConfigError(`invalid gateway config: entitlements.${plan}.prompts references unknown upstream "${name}"`);
+      }
+      if (!entitlement.upstreams.includes(name)) {
+        throw new ConfigError(`invalid gateway config: entitlements.${plan}.prompts.${name} is set but "${name}" is not in that plan's upstreams`);
+      }
+      for (const prompt of prompts) {
+        if (!(upstream.prompts_allow ?? []).includes(prompt)) {
+          throw new ConfigError(`invalid gateway config: entitlements.${plan}.prompts.${name} lists "${prompt}" which is not in upstreams.${name}.prompts_allow`);
         }
       }
     }

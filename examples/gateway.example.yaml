@@ -1,4 +1,4 @@
-# mcp-host-gateway example config (v0).
+# mcp-host-gateway example config.
 # Copy to gateway.yaml (git-ignored is wise if you add real hostnames) and point GATEWAY_CONFIG at it.
 # No secrets belong in this file. Tokens and upstream credentials come from the environment.
 
@@ -26,11 +26,25 @@ auth:
 
 upstreams:
   jobscout:
+    # JobScout's Streamable HTTP entrypoint (jobscout-mcp-http). The names below are exactly what
+    # JobScout's tools/list and prompts/list return (jobscout-mcp main, src/server.ts). Check them
+    # against a live tools/list and prompts/list before changing them: a name JobScout does not
+    # expose is simply never reachable, and a missing one is denied.
     url: https://jobscout.internal/mcp
-    tools_allow: [search_jobs, get_listing]
+    tools_allow:
+      - jobscout_list_sources
+      - jobscout_search_jobs
+      - jobscout_classify_jobs
+      - jobscout_deduplicate
+      - jobscout_source_yield
+      - jobscout_briefing
+    # Prompts are deny by default. Without prompts_allow, prompts/* is not routed for this
+    # upstream and the prompts capability is not advertised.
+    prompts_allow: [jobscout_setup, jobscout_find_jobs]
     # auth_header_env: JOBSCOUT_UPSTREAM_AUTH   # env var holding the full Authorization header value
     # timeout_ms: 30000
   source_pack:
+    # Illustrative sibling upstream (not JobScout). No prompts_allow, so no prompts are routed.
     url: https://source-pack.internal/mcp
     tools_allow: [list_sources, fetch_source]
 
@@ -38,9 +52,12 @@ entitlements:
   free:
     upstreams: [jobscout]
     rpm: 30
-    # Optional narrowing below the upstream allow list:
-    # tools:
-    #   jobscout: [search_jobs]
+    # Optional narrowing below the upstream allow lists. Free callers get search and the
+    # onboarding prompts; the bulk transforms are paid.
+    tools:
+      jobscout: [jobscout_list_sources, jobscout_search_jobs, jobscout_briefing]
+    prompts:
+      jobscout: [jobscout_setup, jobscout_find_jobs]   # [] would mean no prompts on this plan
   paid:
     upstreams: [jobscout, source_pack]
     rpm: 300

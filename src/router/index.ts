@@ -11,12 +11,17 @@ export interface JsonRpcRequest {
   params?: unknown;
 }
 
-/** Methods the gateway will forward. Everything else is refused before it reaches an upstream. */
+/**
+ * Methods the gateway will forward. Everything else is refused before it reaches an upstream.
+ * `prompts/*` is only routed for an upstream that has a `prompts_allow` list (see authoriseRequest).
+ */
 export const ROUTED_METHODS: ReadonlySet<string> = new Set([
   "initialize",
   "ping",
   "tools/list",
   "tools/call",
+  "prompts/list",
+  "prompts/get",
   "notifications/initialized",
   "notifications/cancelled",
 ]);
@@ -61,31 +66,72 @@ export function parseJsonRpc(raw: unknown): JsonRpcRequest {
  */
 export function authoriseRequest(entitlements: EntitlementMap, grant: Grant, request: JsonRpcRequest): void {
   if (!ROUTED_METHODS.has(request.method)) throw methodNotFound(request.method);
-  if (request.method === "tools/call") {
-    const params = request.params;
-    const name = params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
-    if (typeof name !== "string" || name.length === 0) throw invalidRequest("tools/call requires params.name");
-    entitlements.assertTool(grant, name);
-  }
+  // Deny by default: an upstream without prompts_allow does not route prompts/* at all, exactly
+  // as before prompts were supported.
+  if (request.method.startsWith("prompts/") && !grant.promptsRouted) throw methodNotFound(request.method);
+  if (request.method === "tools/call") entitlements.assertTool(grant, requireName(request));
+  if (request.method === "prompts/get") entitlements.assertPrompt(grant, requireName(request));
 }
 
-interface ToolsListResult {
-  tools?: Array<{ name?: unknown }>;
+function requireName(request: JsonRpcRequest): string {
+  const params = request.params;
+  const name = params && typeof params === "object" ? (params as { name?: unknown }).name : undefined;
+  if (typeof name !== "string" || name.length === 0) throw invalidRequest(`${request.method} requires params.name`);
+  return name;
 }
 
-/** Drop tools the plan does not grant. Unknown shapes are passed through untouched. */
-export function filterToolsList(payload: unknown, grant: Grant): unknown {
+function filterNamedList(payload: unknown, key: "tools" | "prompts", allowed: ReadonlySet<string>): unknown {
   if (!payload || typeof payload !== "object") return payload;
-  const message = payload as { result?: ToolsListResult };
-  if (!message.result || !Array.isArray(message.result.tools)) return payload;
+  const message = payload as { result?: Record<string, unknown> };
+  const list = message.result?.[key];
+  if (!message.result || !Array.isArray(list)) return payload;
   return {
     ...message,
     result: {
       ...message.result,
-      tools: message.result.tools.filter((tool) => typeof tool.name === "string" && grant.tools.has(tool.name)),
+      [key]: (list as Array<{ name?: unknown } | null>).filter(
+        (item) => !!item && typeof item.name === "string" && allowed.has(item.name),
+      ),
     },
   };
 }
+
+/** Drop tools the plan does not grant. Unknown shapes are passed through untouched. */
+export function filterToolsList(payload: unknown, grant: Grant): unknown {
+  return filterNamedList(payload, "tools", grant.tools);
+}
+
+/** Drop prompts the plan does not grant. Unknown shapes are passed through untouched. */
+export function filterPromptsList(payload: unknown, grant: Grant): unknown {
+  return filterNamedList(payload, "prompts", grant.prompts);
+}
+
+/**
+ * Rewrite an initialize result so `capabilities` only advertises what the gateway routes for
+ * this caller: `tools` (when the upstream offers it) and `prompts` (only when the caller's grant
+ * has at least one prompt). `resources`, `completions`, `logging`, `experimental` and any
+ * capability the gateway does not know are dropped. Unknown shapes are passed through untouched.
+ */
+export function filterInitializeResult(payload: unknown, grant: Grant): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const message = payload as { result?: { capabilities?: unknown } };
+  if (!message.result || typeof message.result !== "object") return payload;
+  const offered = message.result.capabilities;
+  const capabilities: Record<string, unknown> = {};
+  if (offered && typeof offered === "object") {
+    const caps = offered as Record<string, unknown>;
+    if (caps.tools !== undefined) capabilities.tools = caps.tools;
+    if (caps.prompts !== undefined && grant.prompts.size > 0) capabilities.prompts = caps.prompts;
+  }
+  return { ...message, result: { ...message.result, capabilities } };
+}
+
+/** Result reshapers for the methods whose answers depend on the caller's grant. */
+export const RESHAPERS: Readonly<Record<string, (payload: unknown, grant: Grant) => unknown>> = {
+  initialize: filterInitializeResult,
+  "tools/list": filterToolsList,
+  "prompts/list": filterPromptsList,
+};
 
 /** Parse a buffered text/event-stream body into its JSON data payloads. */
 export function parseSseJson(text: string): unknown[] {
@@ -156,24 +202,26 @@ export class Router {
     const result: ForwardResult = { status: response.status, contentType, body: bytes };
     if (sessionId) result.sessionId = sessionId;
 
-    if (request.method !== "tools/list" || response.status !== 200) return result;
+    const reshape = RESHAPERS[request.method];
+    if (!reshape || response.status !== 200) return result;
 
-    // tools/list: re-shape the advertised tool set to the grant, whatever the transport framing.
+    // initialize, tools/list and prompts/list: re-shape the advertised surface to the grant,
+    // whatever the transport framing.
     const text = new TextDecoder().decode(bytes);
     if (contentType.includes("application/json")) {
       let parsed: unknown;
       try {
         parsed = JSON.parse(text);
       } catch {
-        throw upstreamUnavailable(upstreamName, "tools/list response was not JSON");
+        throw upstreamUnavailable(upstreamName, `${request.method} response was not JSON`);
       }
-      return { ...result, contentType: "application/json", body: JSON.stringify(filterToolsList(parsed, grant)) };
+      return { ...result, contentType: "application/json", body: JSON.stringify(reshape(parsed, grant)) };
     }
     if (contentType.includes("text/event-stream")) {
       const messages = parseSseJson(text);
       const reply = messages.find((m) => m && typeof m === "object" && "result" in (m as object));
-      if (!reply) throw upstreamUnavailable(upstreamName, "tools/list stream carried no result");
-      return { ...result, contentType: "application/json", body: JSON.stringify(filterToolsList(reply, grant)) };
+      if (!reply) throw upstreamUnavailable(upstreamName, `${request.method} stream carried no result`);
+      return { ...result, contentType: "application/json", body: JSON.stringify(reshape(reply, grant)) };
     }
     throw upstreamUnavailable(upstreamName, `unexpected content type ${contentType}`);
   }

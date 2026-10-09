@@ -7,6 +7,10 @@ export interface Grant {
   plan: string;
   upstream: string;
   tools: ReadonlySet<string>;
+  /** Prompts this caller may list and get. Empty when the upstream has no prompts_allow. */
+  prompts: ReadonlySet<string>;
+  /** True when the upstream has a prompts_allow list, so prompts/* is routed at all. */
+  promptsRouted: boolean;
   rpm: number;
 }
 
@@ -14,8 +18,9 @@ export interface Grant {
  * Entitlement map: identity -> plan -> allowed upstreams and tools.
  *
  * The plan comes from the token (JWT claim, or static token entry). The map of plans is static
- * config in v0. Unknown plans, upstreams not on the plan, and tools not on the upstream's allow
- * list are all denied with an explicit reason.
+ * config. Unknown plans, upstreams not on the plan, and tools or prompts not on the upstream's
+ * allow list are all denied with an explicit reason. Prompts are deny by default: an upstream
+ * without prompts_allow grants none.
  */
 export class EntitlementMap {
   private readonly plans: Record<string, PlanConfig>;
@@ -46,7 +51,9 @@ export class EntitlementMap {
     }
     const narrowed = plan.tools?.[upstreamName];
     const tools = new Set(narrowed ?? upstream.tools_allow);
-    return { plan: plan.name, upstream: upstreamName, tools, rpm: plan.rpm };
+    const promptsRouted = upstream.prompts_allow !== undefined;
+    const prompts = new Set(promptsRouted ? (plan.prompts?.[upstreamName] ?? upstream.prompts_allow) : []);
+    return { plan: plan.name, upstream: upstreamName, tools, prompts, promptsRouted, rpm: plan.rpm };
   }
 
   /** Throw if `tool` is outside the grant. */
@@ -56,6 +63,17 @@ export class EntitlementMap {
         plan: grant.plan,
         upstream: grant.upstream,
         tool,
+      });
+    }
+  }
+
+  /** Throw if `prompt` is outside the grant. Same error shape as an un-granted tool. */
+  assertPrompt(grant: Grant, prompt: string): void {
+    if (!grant.prompts.has(prompt)) {
+      throw forbidden(`prompt "${prompt}" is not available on plan "${grant.plan}" for upstream "${grant.upstream}"`, {
+        plan: grant.plan,
+        upstream: grant.upstream,
+        prompt,
       });
     }
   }

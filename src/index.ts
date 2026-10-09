@@ -8,5 +8,5 @@ export type { Authenticator, Identity } from "./auth/index.js";
 export { EntitlementMap } from "./entitlement/index.js";
 export type { Grant } from "./entitlement/index.js";
 export { TokenBucketLimiter } from "./rate/index.js";
-export { Router, filterToolsList, parseJsonRpc, parseSseJson, authoriseRequest, ROUTED_METHODS } from "./router/index.js";
+export { Router, filterToolsList, filterPromptsList, filterInitializeResult, parseJsonRpc, parseSseJson, authoriseRequest, ROUTED_METHODS } from "./router/index.js";
 export { Logger, redact, redactString, silentLogger } from "./log.js";
