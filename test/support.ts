@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 
 import type { GatewayConfig } from "../src/config.js";
 import { parseConfig } from "../src/config.js";
+import { parseSseJson } from "../src/router/index.js";
 
 export const STUB_TOOLS = [
   { name: "search_jobs", description: "Search", inputSchema: { type: "object" } },
@@ -142,10 +143,16 @@ export async function rpc(
   });
   const text = await response.text();
   let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = text;
+  if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+    // Streamed answer: the JSON-RPC response is the event carrying a result or an error.
+    const messages = parseSseJson(text);
+    json = messages.find((m) => !!m && typeof m === "object" && ("result" in m || "error" in m)) ?? text;
+  } else {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = text;
+    }
   }
   return { status: response.status, headers: response.headers, json };
 }

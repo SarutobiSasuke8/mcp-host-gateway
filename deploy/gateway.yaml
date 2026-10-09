@@ -1,0 +1,48 @@
+# Production-shaped gateway config for the compose recipe. Copy to
+# /etc/mcp-host-gateway/gateway.yaml on the VPS and replace every placeholder.
+# No secrets belong in this file.
+version: 1
+
+listen:
+  host: 0.0.0.0          # inside the container; only Caddy can reach it
+  port: 8080
+
+auth:
+  mode: jwt
+  issuer: https://accounts.example.com          # placeholder: your OAuth or paid-account issuer
+  audience: mcp-host-gateway
+  # jwks_url: https://accounts.example.com/.well-known/jwks.json
+  plan_claim: plan
+
+upstreams:
+  jobscout:
+    url: http://jobscout:8080/mcp                # compose service name on the internal network
+    tools_allow:
+      - jobscout_list_sources
+      - jobscout_search_jobs
+      - jobscout_classify_jobs
+      - jobscout_deduplicate
+      - jobscout_source_yield
+      - jobscout_briefing
+    prompts_allow: [jobscout_setup, jobscout_find_jobs]
+    # auth_header_env: JOBSCOUT_UPSTREAM_AUTH    # set if JobScout runs with JOBSCOUT_HTTP_BEARER_TOKEN
+    timeout_ms: 120000
+
+entitlements:
+  free:
+    upstreams: [jobscout]
+    rpm: 30
+    tools:
+      jobscout: [jobscout_list_sources, jobscout_search_jobs, jobscout_briefing]
+  paid:
+    upstreams: [jobscout]
+    rpm: 300
+
+rate:
+  scope: identity
+  store: sqlite
+  sqlite_path: /app/data/rate.sqlite
+
+audit:
+  sink: file
+  path: /app/data/audit.jsonl

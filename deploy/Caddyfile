@@ -1,0 +1,35 @@
+# Caddy terminates TLS (automatic ACME certificates) and forwards MCP traffic to the gateway.
+# GATEWAY_DOMAIN and ACME_EMAIL come from the compose environment (deploy/.env).
+{
+	email {$ACME_EMAIL}
+}
+
+{$GATEWAY_DOMAIN} {
+	# MCP endpoints only. /health and /ready stay on the internal network for Docker.
+	handle /mcp/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy gateway:8080 {
+			# Relay SSE events the moment the gateway writes them (Caddy also does this
+			# automatically for text/event-stream; stated here so it is not lost in edits).
+			flush_interval -1
+			# Long tool calls stream for as long as the upstream timeout allows.
+			transport http {
+				read_timeout 130s
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	# No access log by default: request lines are not needed, the gateway audit log is the
+	# record of every call. If you enable `log`, keep Caddy's default redaction of the
+	# Authorization header.
+}
