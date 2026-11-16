@@ -8,7 +8,7 @@ A client speaks MCP over Streamable HTTP to `https://gateway.example/mcp/<upstre
 
 `Workspace/Grok/Astraeus/Astraeus MCP Host Gateway Design.md`
 
-in [SarutobiSasuke8/agentic-satellite-vault](https://github.com/SarutobiSasuke8/agentic-satellite-vault) (private).
+in the private Agentic Satellite Vault repository (not publicly accessible).
 
 ## Not this project
 
